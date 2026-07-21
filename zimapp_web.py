@@ -19,7 +19,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import zimapp_core as core
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-VERSION = "v2.0"
+# Main carries update/drift and the framework checks, which the released
+# v2.0.0 image does not. Saying "v2.0" here would make a checkout look like
+# the published image — the suffix says which side of the tag you are on.
+VERSION = "v2.1-dev"
 # The request body carries the JSON envelope around an opened file, and escaping
 # newlines/quotes inflates it well beyond the file size. With both limits at 2 MB a
 # 1.9 MB file was accepted by the browser ("the limit is 2 MB") and then rejected

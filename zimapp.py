@@ -17,6 +17,8 @@ Usage:
     zimapp.py generate nginx:alpine --host 192.168.1.100 --title "Webserver" > app.yml
     zimapp.py validate app.yml
     zimapp.py install  app.yml --host 192.168.1.100
+    zimapp.py update   my-webserver --blueprint my-webserver     # diff; --apply to apply
+    zimapp.py drift                                              # has upstream moved?
     zimapp.py uninstall my-webserver --host 192.168.1.100
 
 Credentials come from the environment (ZIMA_USER / ZIMA_PASS) or --user/--pass.
