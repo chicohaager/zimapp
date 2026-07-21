@@ -1689,6 +1689,398 @@ def app_base_url(host, name, user, password):
     raise ConvertError(f"App '{name}' is not installed on {host}.")
 
 
+# --- Update: read back, compare, apply --------------------------------------
+#
+# ZimaOS stores a normalised version of what it was sent, so a textual diff
+# between "the file I have" and "what is installed" is nothing but noise. Every
+# transformation below was read off the live system on 2026-07-21 by installing
+# a known file and fetching it back:
+#
+#   environment:  ["A=b"]        -> {"A": "b"}
+#   memory:       "1GB"          -> "1073741824"   (bytes, as a string)
+#   networks:     {n: {driver}}  -> gains name/external/ipam
+#   services:     command/entrypoint: null and deploy.resources.placement: {} added
+#   services.*.x-casaos          -> NOT returned at all
+#
+# The last one is the reason `SERVICE_X_CASAOS_NOTE` exists: that block cannot be
+# compared, and a comparison that quietly skips a part of the file is exactly the
+# kind of assurance that looks green without having looked.
+
+MEMORY_UNITS = {"b": 1, "k": 1024, "kb": 1024, "m": 1024**2, "mb": 1024**2,
+                "g": 1024**3, "gb": 1024**3, "t": 1024**4, "tb": 1024**4}
+
+SERVICE_X_CASAOS_NOTE = (
+    "the per-service 'x-casaos' block (port/volume descriptions) is not part of "
+    "the comparison — the ZimaOS API does not return it; neither is "
+    "x-casaos.store_app_id, which ZimaOS adds on installation"
+)
+
+# Fields inside the top-level x-casaos block that ZimaOS fills in itself. They
+# are in every installed app and in none of ours, so comparing them would report
+# a removal on every single update.
+X_CASAOS_ADDED_BY_ZIMAOS = ("store_app_id",)
+
+
+def _memory_bytes(value):
+    """'1GB' / '512m' / '1073741824' -> int. Unparsable stays a string."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]*)", text)
+    if not m:
+        return text
+    number, unit = float(m.group(1)), m.group(2).lower()
+    if unit and unit not in MEMORY_UNITS:
+        return text
+    return int(number * MEMORY_UNITS.get(unit, 1))
+
+
+def _env_dict(value):
+    """environment as list or dict -> dict. 'A' without '=' means 'take from the host'."""
+    if isinstance(value, dict):
+        return {str(k): (None if v is None else str(v)) for k, v in value.items()}
+    out = {}
+    for item in value or []:
+        key, sep, val = str(item).partition("=")
+        out[key] = val if sep else None
+    return out
+
+
+def _port_key(entry):
+    """One published port as a comparable tuple, whatever notation it arrived in."""
+    if isinstance(entry, dict):
+        return (str(entry.get("target") or ""), str(entry.get("published") or ""),
+                str(entry.get("protocol") or "tcp"))
+    text = str(entry)
+    protocol = "tcp"
+    if "/" in text:
+        text, protocol = text.rsplit("/", 1)
+    parts = text.split(":")
+    published, target = (parts[-2], parts[-1]) if len(parts) >= 2 else ("", parts[-1])
+    return (target, published, protocol)
+
+
+def _volume_key(entry):
+    if isinstance(entry, dict):
+        return (str(entry.get("target") or ""), str(entry.get("source") or ""),
+                str(entry.get("type") or "bind"))
+    parts = str(entry).split(":")
+    return (parts[1] if len(parts) > 1 else parts[0], parts[0], "bind")
+
+
+def normalize_for_compare(doc):
+    """A compose document reduced to what can honestly be compared.
+
+    Everything ZimaOS adds or rewrites on its own is levelled here, so a diff
+    shows changes that someone actually made — not the storage format.
+    """
+    doc = doc or {}
+    x_casaos = {k: v for k, v in (doc.get("x-casaos") or {}).items()
+                if k not in X_CASAOS_ADDED_BY_ZIMAOS}
+    out = {"name": doc.get("name"), "services": {}, "x-casaos": x_casaos}
+
+    for name, svc in (doc.get("services") or {}).items():
+        svc = svc or {}
+        clean = {}
+        for key, value in svc.items():
+            if key in ("command", "entrypoint") and value is None:
+                continue          # ZimaOS adds these as null
+            if key == "x-casaos":
+                continue          # not returned by the API — see SERVICE_X_CASAOS_NOTE
+            if key == "environment":
+                clean["environment"] = _env_dict(value)
+            elif key == "ports":
+                clean["ports"] = sorted(_port_key(p) for p in value or [])
+            elif key == "volumes":
+                clean["volumes"] = sorted(_volume_key(v) for v in value or [])
+            elif key == "networks":
+                clean["networks"] = sorted(value.keys() if isinstance(value, dict) else value or [])
+            elif key == "depends_on":
+                # Short list and long form mean the same thing; 'service_started'
+                # is docker's default. Comparing them raw would report a change
+                # on every update while nothing changed — but a real
+                # 'service_healthy' still shows up.
+                if isinstance(value, dict):
+                    clean["depends_on"] = {k: ((v or {}).get("condition") or "service_started")
+                                           for k, v in value.items()}
+                else:
+                    clean["depends_on"] = {str(k): "service_started" for k in value or []}
+            elif key == "deploy":
+                limits = ((value or {}).get("resources") or {}).get("limits") or {}
+                deploy = {}
+                if limits.get("memory") is not None:
+                    deploy["memory"] = _memory_bytes(limits["memory"])
+                if limits.get("cpus") is not None:
+                    try:
+                        deploy["cpus"] = float(str(limits["cpus"]).replace(",", "."))
+                    except ValueError:
+                        deploy["cpus"] = str(limits["cpus"])
+                clean["deploy"] = deploy
+            else:
+                clean[key] = value
+        out["services"][name] = clean
+
+    # Only the network names and their driver are ours; name/external/ipam are
+    # filled in by ZimaOS. 'default' is added by compose itself.
+    networks = {}
+    for name, spec in (doc.get("networks") or {}).items():
+        if name == "default":
+            continue
+        networks[name] = (spec or {}).get("driver")
+    out["networks"] = networks
+    return out
+
+
+def _flatten(value, prefix=""):
+    """Nested structure -> {'a.b.c': leaf}. Lists are compared as a whole."""
+    if isinstance(value, dict):
+        flat = {}
+        for key, sub in value.items():
+            flat.update(_flatten(sub, f"{prefix}.{key}" if prefix else str(key)))
+        return flat
+    return {prefix: value}
+
+
+def compose_diff(installed, desired):
+    """What would change, field by field.
+
+    Returns a list of {path, installed, desired, kind} with kind in
+    add/remove/change. Both documents go through normalize_for_compare first.
+    """
+    left = _flatten(normalize_for_compare(installed))
+    right = _flatten(normalize_for_compare(desired))
+    changes = []
+    for path in sorted(set(left) | set(right)):
+        old, new = left.get(path, KeyError), right.get(path, KeyError)
+        if old is KeyError:
+            changes.append({"path": path, "installed": None, "desired": new, "kind": "add"})
+        elif new is KeyError:
+            changes.append({"path": path, "installed": old, "desired": None, "kind": "remove"})
+        elif old != new:
+            changes.append({"path": path, "installed": old, "desired": new, "kind": "change"})
+    return changes
+
+
+def installed_compose(host, name, user=None, password=None, token=None):
+    """The compose ZimaOS actually stores for an installed app.
+
+    Returns (doc, status, token). This is the only honest starting point for an
+    update: the file on the machine that generated it may be older, newer, or
+    from a different machine altogether.
+    """
+    token = token or login(host, user, password)
+    status, raw = api(host, "GET", f"{INSTALL_PATH}/{name}", token)
+    if status == 404:
+        raise ConvertError(
+            f"'{name}' is not installed on {host}. `update` changes an existing app — "
+            f"use `install` for a new one."
+        )
+    if status != 200:
+        raise ConvertError(f"Reading the installed compose of '{name}' failed (HTTP {status}): {raw[:200]}")
+    try:
+        data = json.loads(raw)["data"]
+    except (KeyError, json.JSONDecodeError) as e:
+        raise ConvertError(f"Unexpected answer for '{name}': {raw[:200]}") from e
+    return data.get("compose") or {}, data.get("status"), token
+
+
+def meta_from_installed(doc):
+    """The x-casaos block of an installed app, back in the shape convert() wants.
+
+    Without this, re-converting from the source would reset title, icon and
+    category to whatever the generator guesses, and the diff would be full of
+    changes nobody asked for.
+    """
+    xc = (doc or {}).get("x-casaos") or {}
+    title = xc.get("title") or {}
+    main = xc.get("main") or ""
+    service = ((doc.get("services") or {}).get(main) or {}) if main else {}
+    limits = ((service.get("deploy") or {}).get("resources") or {}).get("limits") or {}
+    meta = {
+        "name": doc.get("name") or "",
+        "title": (title.get("custom") or title.get("en_us") or "") if isinstance(title, dict) else str(title),
+        "author": xc.get("author") or "",
+        "category": xc.get("category") or "",
+        "tagline": (xc.get("tagline") or {}).get("en_us", "") if isinstance(xc.get("tagline"), dict) else "",
+        "description": (xc.get("description") or {}).get("en_us", "") if isinstance(xc.get("description"), dict) else "",
+        "icon": xc.get("icon") or "",
+        "index": xc.get("index") or "",
+        "main": main,
+        "memory": limits.get("memory") or "",
+        "cpus": limits.get("cpus") or "",
+    }
+    return {k: v for k, v in meta.items() if v not in ("", None)}
+
+
+def installed_env(doc):
+    """{service: {KEY: value}} of an installed app — the values an update must keep.
+
+    Re-converting from the source would generate fresh passwords, and a fresh
+    POSTGRES_PASSWORD against an existing database volume means the app never
+    comes up again. So the installed values win over anything generated, and the
+    caller has to override deliberately.
+    """
+    return {name: _env_dict((svc or {}).get("environment"))
+            for name, svc in ((doc or {}).get("services") or {}).items()}
+
+
+def keep_installed_values(doc, installed, generated, force=()):
+    """Put values that already run back into a freshly generated compose.
+
+    A regenerated secret is not a new secret, it is a broken app: a fresh
+    POSTGRES_PASSWORD against an existing data volume locks the database out of
+    its own files, a fresh SECRET_KEY invalidates every session. Only values
+    that were GENERATED are restored this way — whatever the source or a
+    blueprint states explicitly is a deliberate change and stays visible in the
+    diff, where someone can decide about it.
+
+    `force` names further keys to keep regardless of where the new value comes
+    from — for the case where a blueprint states a value that is right for a
+    fresh installation but wrong for this one (an admin user, say).
+
+    Returns the names that were put back. They are no longer generated, and the
+    caller must stop presenting them as such.
+    """
+    force = set(force or ())
+    if not generated and not force:
+        return []
+    existing = installed_env(installed)
+    kept = []
+    for service, svc in (doc.get("services") or {}).items():
+        entries = (svc or {}).get("environment")
+        if not entries:
+            continue
+        have = existing.get(service) or {}
+        rebuilt = []
+        for entry in entries if isinstance(entries, list) else [f"{k}={v}" for k, v in entries.items()]:
+            key, sep, _ = str(entry).partition("=")
+            if sep and (key in generated or key in force) and have.get(key):
+                rebuilt.append(f"{key}={have[key]}")
+                kept.append(key)
+            else:
+                rebuilt.append(entry)
+        svc["environment"] = rebuilt
+    return sorted(set(kept))
+
+
+def carry_over_values(doc, variable_names):
+    """Installed values for the variables the source asks for: {VAR: value}."""
+    known = {}
+    for values in installed_env(doc).values():
+        for key, value in values.items():
+            if key in variable_names and value:
+                known.setdefault(key, value)
+    return known
+
+
+def apply_update(host, name, text, user=None, password=None, token=None):
+    """PUT the new compose. HTTP 200 here means 'accepted' — nothing more."""
+    token = token or login(host, user, password)
+    status, raw = api(host, "PUT", f"{INSTALL_PATH}/{name}", token, text, "application/yaml")
+    return status, raw, token
+
+
+def _image_key(image):
+    """Comparable form of an image reference: 'redis' and 'docker.io/library/redis:latest' match."""
+    text = str(image or "").strip()
+    for prefix in ("docker.io/library/", "docker.io/", "index.docker.io/library/", "index.docker.io/"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    if "@" not in text:
+        head, _, tail = text.rpartition("/")
+        if ":" not in tail:
+            text += ":latest"
+    return text
+
+
+def running_containers(host, name, user=None, password=None, token=None):
+    """{service: {image, state, status, exit_code, health, id}} of a running app.
+
+    This is the only witness for what an app REALLY runs. The stored compose is
+    not: see wait_for_update.
+    """
+    token = token or login(host, user, password)
+    status, raw = api(host, "GET", f"{INSTALL_PATH}/{name}/containers", token)
+    if status != 200:
+        raise ConvertError(
+            f"Container state of '{name}' not readable (HTTP {status}): {raw[:200]}")
+    try:
+        containers = (json.loads(raw).get("data") or {}).get("containers") or {}
+    except json.JSONDecodeError as e:
+        raise ConvertError(f"Unexpected container answer for '{name}': {raw[:200]}") from e
+    out = {}
+    for service, c in containers.items():
+        c = c or {}
+        out[service] = {"image": c.get("Image") or "", "state": c.get("State") or "",
+                        "status": c.get("Status") or "", "exit_code": c.get("ExitCode"),
+                        "health": c.get("Health") or "", "id": c.get("ID") or ""}
+    return out, token
+
+
+def running_mismatch(desired, containers):
+    """Which services do NOT run what the new compose says. [] means: they all do."""
+    problems = []
+    for service, svc in (desired.get("services") or {}).items():
+        want = _image_key((svc or {}).get("image"))
+        actual = containers.get(service)
+        if actual is None:
+            problems.append(f"{service}: no container at all")
+            continue
+        if _image_key(actual["image"]) != want:
+            problems.append(f"{service}: runs {actual['image'] or '(none)'}, should run {want}")
+        elif actual["state"] != "running":
+            problems.append(f"{service}: state '{actual['state'] or '?'}' ({actual['status']})"
+                            + (f", exit code {actual['exit_code']}" if actual.get("exit_code") else ""))
+    return problems
+
+
+def wait_for_update(host, name, desired, user=None, password=None, token=None,
+                    timeout=180, interval=3, on_progress=None):
+    """Wait until the app REALLY runs the new definition.
+
+    Four things were measured on the live system on 2026-07-21, and each of them
+    breaks a cheaper signal:
+
+      - HTTP 200 on the PUT means "accepted". A change ZimaOS cannot carry out
+        gets exactly the same answer.
+      - The app status stays 'running' during a failed update — it never turns
+        into an error, because the OLD container keeps running.
+      - The stored compose shows the new definition even when it was never
+        carried out. In one run it was rolled back after ~7s, in the next it was
+        still there after 21s — there is no waiting time that makes this signal
+        trustworthy.
+      - The app grid is no independent witness: its `image` field flips together
+        with the stored compose.
+
+    What does hold: GET .../containers reports the image the container actually
+    runs. So the signal is "stored compose matches AND every service runs the
+    image it should, in state running".
+
+    Returns a dict with applied / remaining / running_problems / status / waited.
+    """
+    token = token or login(host, user, password)
+    waited, remaining, problems, status = 0, [], [], None
+    while True:
+        current, status, token = installed_compose(host, name, token=token)
+        remaining = compose_diff(current, desired)
+        try:
+            containers, token = running_containers(host, name, token=token)
+            problems = running_mismatch(desired, containers)
+        except ConvertError as e:
+            problems = [str(e)]
+        if on_progress:
+            on_progress(waited, status, len(remaining), problems)
+        if not remaining and not problems:
+            return {"applied": True, "remaining": [], "running_problems": [],
+                    "status": status, "waited": waited}
+        if waited >= timeout:
+            return {"applied": False, "remaining": remaining, "running_problems": problems,
+                    "status": status, "waited": waited}
+        time.sleep(interval)
+        waited += interval
+
+
 # --- Post-install follow-up -------------------------------------------------
 #
 # The install API answers "accepted", not "done". Everything that decides

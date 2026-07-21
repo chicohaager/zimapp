@@ -21,9 +21,9 @@ conversion, and the install form](docs/screenshot-result.jpg)
 Verified on **ZimaOS v1.7.0-beta1** (host 192.168.1.100), as of 19.07.2026:
 paperless-ngx (webserver + postgres + redis) generated from the upstream URL,
 installed, container `healthy`, tile in the grid, login as superuser proven.
-zimapp itself runs there as an app on port 8790. On 21.07.2026 the released
-image was installed from `zimapp-zimaos.yml` on the same host — see the header
-of that file for what exactly was measured.
+zimapp itself runs there as an app on port 8790 — since 21.07.2026 from the
+released image, applied to the running installation with `zimapp.py update`
+(see the header of `zimapp-zimaos.yml` for what was measured).
 
 > **A note on the `§` references.** They point into a private ZimaOS knowledge
 > base that is not part of this repository — measurements of undocumented ZimaOS
@@ -130,6 +130,11 @@ Then: **<http://192.168.1.100:8790>**, tile "zimapp" in the ZimaOS grid.
 🔴 **After a rebuild, `docker restart` is not enough** — the existing container
 keeps running with the old image. A new image needs a recreate.
 
+`update` does not help here: it applies a **changed definition**, and a rebuild
+under the same tag changes nothing in the compose — the command stops at "no
+differences". Either give the rebuild a new tag (then `update --file` switches
+to it, keeping the data directory), or use the loop below.
+
 🔴 **`uninstall` deletes the image the container was created from** — by ID, not
 by tag (verified 2026-07-19). So the recreate loop is **rebuild → uninstall →
 install**, never the other way round:
@@ -183,7 +188,62 @@ python3 zimapp.py generate louislam/uptime-kuma:1 --title "Uptime Kuma" > kuma.y
 python3 zimapp.py validate  immich.yml
 python3 zimapp.py install   immich.yml     # waits and checks; --no-wait skips that
 python3 zimapp.py uninstall immich
+
+# change an installed app without uninstalling it
+python3 zimapp.py update immich --blueprint immich          # dry run: what would change
+python3 zimapp.py update immich --blueprint immich --apply  # and now do it
 ```
+
+### `update` — changing an app without destroying it
+
+`uninstall` + `install` is not an update: it deletes the app's **images** and its
+**data directory**. `update` changes the installation in place
+(`PUT /v2/app_management/compose/<app>`), which keeps both.
+
+It starts from what ZimaOS actually has, not from a file lying around here:
+
+1. read the installed compose back from the host,
+2. build the new one — from `--source <URL>`, `--blueprint <name>`, a
+   `--file`, or the blueprint that carries the app's own name,
+3. show what would change, field by field,
+4. only with `--apply`: send it and wait until the app really runs it.
+
+Without `--apply` nothing is sent and the exit code is **2 if there are
+differences**, 0 if there are none — that is the drift check for a cron job.
+
+```text
+5 difference(s) between the installation and the new definition:
+  ~ services.webserver.image
+      'ghcr.io/paperless-ngx/paperless-ngx:2.14'  ->  'ghcr.io/paperless-ngx/paperless-ngx:2.15'
+  ~ x-casaos.tagline.en_us
+      'Dokumentenarchiv mit OCR'  ->  'Document archive with OCR'
+```
+
+**Values that already run are kept.** A regenerated `POSTGRES_PASSWORD` against
+an existing database volume means the app never comes up again, so anything
+zimapp *generated* is taken from the installation instead. Values a source or a
+blueprint states explicitly stay a visible difference — `--keep NAME` keeps
+those too, `--var NAME=VALUE` overrides.
+
+🔴 **What ZimaOS reports about an update cannot be believed** (measured
+2026-07-21). A `PUT` whose image cannot be pulled answers `HTTP 200`, appears in
+the stored compose — in one run for 7 seconds, in the next for over 21 — and the
+app keeps reporting `running` the whole time, because the old container never
+stopped. The app grid is no second opinion: its `image` field flips along with
+the stored file. `update` therefore waits for
+`GET /v2/app_management/compose/<app>/containers`, which reports the image a
+container actually runs, and fails loudly when the app is still on the old one:
+
+```text
+  RUNNING: app: runs chicohaager/zimapp:2.0.0, should run chicohaager/zimapp:1.9
+ERROR: The app does not run the new definition. Nothing was destroyed — the old
+container is still up, which is exactly why neither the app status nor the
+stored compose shows a problem.
+```
+
+Not compared, because the API does not return it: the per-service `x-casaos`
+block (port and volume descriptions) and `x-casaos.store_app_id`. The command
+says so every time rather than quietly leaving it out.
 
 ### After the install
 
