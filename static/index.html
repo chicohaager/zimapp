@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <title>zimapp — compose URL to ZimaOS app</title>
+  <link rel="stylesheet" href="./styles.css?v=1">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="title-row">
+      <h1>zimapp</h1>
+      <span class="version" id="app-version">v2</span>
+    </div>
+    <p class="subtitle">
+      Throw in a URL to a <code>docker-compose.yml</code> (or a <code>Dockerfile</code>) &mdash;
+      zimapp turns it into a ZimaOS-conformant compose with an <code>x-casaos</code> block, checks it against
+      the eight rules and installs it. Multi-service stacks (app&nbsp;+&nbsp;database) stay
+      <b>one</b> app: <code>x-casaos.main</code> points at the WebUI service.
+    </p>
+    <div class="steps">
+      <span class="step active" id="step-1"><span class="num">1</span> Load source</span>
+      <span class="step" id="step-2"><span class="num">2</span> Metadata &amp; variables</span>
+      <span class="step" id="step-3"><span class="num">3</span> Check compose</span>
+      <span class="step" id="step-4"><span class="num">4</span> Install</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- 1 — Source -->
+    <section class="card">
+      <h2>1 &middot; Source</h2>
+      <p class="panel-hint">
+        GitHub/GitLab <code>blob</code> links are flipped to their raw variant automatically.
+        <strong>Open&nbsp;.yml</strong> reads a file from this computer &mdash; a typed path would
+        be looked for inside the zimapp container, not on your machine.
+      </p>
+      <div class="fld" id="fld-blueprint" hidden>
+        <label for="src-blueprint">Blueprint <span class="hint">(tested recipe: pinned source + the values an app needs to be usable + expectations)</span></label>
+        <select id="src-blueprint"></select>
+        <span class="hint" id="blueprint-proof"></span>
+      </div>
+      <div class="row-inline">
+        <div class="fld">
+          <label for="src-url">URL to the compose file / Dockerfile</label>
+          <input type="text" id="src-url" placeholder="https://github.com/…/docker-compose.yml" spellcheck="false">
+          <span class="hint" id="src-file-note"></span>
+        </div>
+        <input type="file" id="src-file" accept=".yml,.yaml,.txt,text/yaml,text/plain" hidden>
+        <button id="btn-open" style="margin-top:22px" title="Read a .yml from this computer">Open .yml…</button>
+        <button class="btn-primary" id="btn-analyze" style="margin-top:22px">Analyze</button>
+      </div>
+      <div id="analyze-msgs"></div>
+    </section>
+
+    <!-- 2 — Stack -->
+    <section class="card" id="card-stack" hidden>
+      <h2>2 &middot; Detected stack</h2>
+      <p class="panel-hint">
+        <span class="badge badge-main">main</span> serves the WebUI and gets <code>port_map</code> &middot;
+        <span class="badge badge-support">support</span> is infrastructure (database, cache, queue).
+      </p>
+      <div class="svc-list" id="svc-list"></div>
+    </section>
+
+    <!-- 3 — Metadata -->
+    <section class="card" id="card-meta" hidden>
+      <h2>3 &middot; App metadata</h2>
+      <p class="panel-hint">Ends up in the <code>x-casaos</code> block &mdash; that is what ZimaOS shows on the tile.</p>
+      <div class="grid2">
+        <div class="fld"><label for="m-name">App ID <span class="hint">(directory name under /DATA/AppData)</span></label><input type="text" id="m-name"></div>
+        <div class="fld"><label for="m-title">Title</label><input type="text" id="m-title"></div>
+        <div class="fld"><label for="m-main">WebUI service <span class="hint">(x-casaos.main)</span></label><select id="m-main"></select></div>
+        <div class="fld"><label for="m-category">Category</label><select id="m-category"></select></div>
+        <div class="fld"><label for="m-author">Author</label><input type="text" id="m-author" placeholder="your name"></div>
+        <div class="fld"><label for="m-icon">Icon URL <span class="hint">(must be reachable, Rule 8 &mdash; filled in from the app id if an icon exists)</span></label><input type="text" id="m-icon" placeholder="empty = blank tile"></div>
+        <div class="fld"><label for="m-tagline">Tagline</label><input type="text" id="m-tagline" placeholder="Self-hosted app"></div>
+        <div class="fld"><label for="m-index">Index path</label><input type="text" id="m-index" placeholder="/"></div>
+        <div class="fld"><label for="m-memory">Memory limit <span class="hint">(dot, not comma &mdash; Rule 6)</span></label><input type="text" id="m-memory" placeholder="2GB"></div>
+        <div class="fld"><label for="m-cpus">CPU limit</label><input type="text" id="m-cpus" placeholder="2.00"></div>
+      </div>
+      <div class="fld"><label for="m-description">Description</label><input type="text" id="m-description" placeholder="empty = tagline"></div>
+      <div class="grid2" id="fld-image" hidden>
+        <div class="fld">
+          <label for="m-image">Image <span class="hint">(required for a Dockerfile source &mdash; ZimaOS does not build, §4.4.1)</span></label>
+          <input type="text" id="m-image" placeholder="ghcr.io/dir/app:1.2">
+        </div>
+        <div class="fld">
+          <label for="m-port">WebUI port <span class="hint">(container port &mdash; needed when the Dockerfile has no EXPOSE)</span></label>
+          <input type="text" id="m-port" placeholder="8080">
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 — Variables -->
+    <section class="card" id="card-vars" hidden>
+      <h2>4 &middot; Variables from the source</h2>
+      <p class="panel-hint">
+        ZimaOS ships <b>no <code>.env</code></b> with it &mdash; every unresolved <code>${VAR}</code> is a
+        startup failure, not a cosmetic flaw. Empty secret fields are filled with a
+        random value on request and shown below in plain text.
+      </p>
+      <div class="grid2" id="var-list"></div>
+      <label class="check"><input type="checkbox" id="opt-secrets" checked> Generate missing passwords/tokens automatically</label>
+    </section>
+
+    <!-- 5 — Target & generate -->
+    <section class="card" id="card-target" hidden>
+      <h2>5 &middot; Target system</h2>
+      <div class="grid2">
+        <div class="fld"><label for="t-host">ZimaOS host</label><input type="text" id="t-host"></div>
+        <div class="fld"><label for="t-ssh">SSH user <span class="hint">(only for the full port view)</span></label><input type="text" id="t-ssh"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="opt-ports"> Check which host ports are taken</label>
+      <p class="panel-hint" style="margin:6px 0 0">
+        Uses the <b>app grid API</b> (credentials from step 7 &mdash; works without SSH, but sees
+        only ZimaOS apps) and <b>docker via SSH</b> (needs a key login, sees foreign containers too).
+        Whichever answers is used; the result says which one did.
+      </p>
+      <div class="action-row">
+        <button class="btn-primary" id="btn-generate">Generate compose</button>
+      </div>
+      <div id="generate-msgs"></div>
+    </section>
+
+    <!-- 6 — Result -->
+    <section class="card" id="card-result" hidden>
+      <h2>6 &middot; Result</h2>
+      <div id="result-msgs"></div>
+      <div class="msg secrets" id="secrets-box" hidden>
+        <b>Generated secrets &mdash; write them down now, otherwise they only exist in this compose:</b>
+        <dl id="secrets-list"></dl>
+      </div>
+      <div class="fld">
+        <label for="out-yaml">ZimaOS compose <span class="hint">(editable &mdash; changes are re-validated before installing)</span></label>
+        <textarea class="output" id="out-yaml" spellcheck="false"></textarea>
+      </div>
+      <div class="action-row">
+        <button id="btn-validate">Re-validate</button>
+        <button id="btn-download">Download</button>
+        <button id="btn-copy">Copy</button>
+        <button id="btn-save-bp" title="Stores source URL + values as a reusable recipe, not a copy of the compose">Save as blueprint</button>
+      </div>
+    </section>
+
+    <!-- 7 — Install -->
+    <section class="card" id="card-install" hidden>
+      <h2>7 &middot; Install on ZimaOS</h2>
+      <p class="panel-hint">
+        <code>POST /v2/app_management/compose</code> with raw YAML. The installation runs
+        <b>asynchronously</b> &mdash; HTTP 200 means &ldquo;accepted&rdquo;, not &ldquo;done&rdquo;.
+        Credentials are used for this request only and are stored nowhere.
+      </p>
+      <div class="grid2">
+        <div class="fld"><label for="i-user">Username</label><input type="text" id="i-user" autocomplete="username"></div>
+        <div class="fld"><label for="i-pass">Password</label><input type="password" id="i-pass" autocomplete="current-password"></div>
+      </div>
+      <div class="action-row">
+        <button class="btn-primary" id="btn-install">Install</button>
+        <button id="btn-verify" hidden>Verify installation</button>
+        <button class="btn-danger" id="btn-uninstall">Uninstall (including data)</button>
+      </div>
+      <div id="install-msgs"></div>
+      <pre class="output" id="install-out" hidden></pre>
+    </section>
+  </main>
+
+  <footer>
+    Rules and pitfalls: <code>README.md</code> &middot; ZimaOS quirks:
+    <code>~/dev/ZIMAOS-KNOWLEDGE.md</code> §3.4, §4.4.1, §5. Color scheme taken from the ZFW dashboard.
+  </footer>
+</div>
+<script src="./app.js?v=1"></script>
+</body>
+</html>

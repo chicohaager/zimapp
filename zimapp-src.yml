@@ -1,0 +1,9 @@
+services:
+  app:
+    image: zimapp:local
+    ports:
+      - "8790:8790"
+    environment:
+      - ZIMA_HOST=192.168.1.100        # your ZimaOS host
+      - ZIMA_SSH_USER=youruser         # only needed for the full port view
+    restart: unless-stopped

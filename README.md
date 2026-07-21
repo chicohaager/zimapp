@@ -1,0 +1,406 @@
+# zimapp — compose URL → ZimaOS app
+
+Takes a **URL to a `docker-compose.yml`** (or a `Dockerfile`, or a
+Docker image), builds a ZimaOS-conformant compose with an `x-casaos` block from
+it, validates it against the known pitfalls and installs it via the official
+ZimaOS API. **Multi-service stacks (app + database + cache) become exactly
+one ZimaOS app.**
+
+There is a **web UI** (color scheme from the ZFW dashboard) and a CLI.
+
+Verified on **ZimaOS v1.7.0-beta1** (host 192.168.1.100), as of 19.07.2026:
+paperless-ngx (webserver + postgres + redis) generated from the upstream URL,
+installed, container `healthy`, tile in the grid, login as superuser proven.
+zimapp itself runs there as an app on port 8790.
+
+> **A note on the `§` references.** They point into a private ZimaOS knowledge
+> base that is not part of this repository — measurements of undocumented ZimaOS
+> behaviour collected while building this. They are kept in the text because they
+> say *where a rule comes from*, not because you can look them up. Every rule they
+> back is spelled out in full here as well.
+
+## Why
+
+ZimaOS expects a compose with an `x-casaos` block. Its rules are not
+documented, and the system acknowledges violations either with a cryptic
+message or — worse — with nothing at all: the app runs, but never shows up in
+the grid. On top of that, a compose from the net builds on things that do not
+exist on ZimaOS: an `.env` next to it, relative paths like `./data`, named
+volumes, arbitrary host ports. `zimapp` translates that once, instead of
+guessing it anew per app.
+
+## Web UI
+
+```bash
+pip install pyyaml          # only dependency
+python3 zimapp.py serve     # http://127.0.0.1:8790
+```
+
+Flow: throw in a URL → look at the detected stack (who is WebUI, who is
+database) → fill in metadata and variables → generate compose → validate →
+install. Generated passwords are displayed in cleartext, because otherwise they
+would only be in the compose.
+
+Instead of a URL, **Open .yml…** reads a file from the machine the browser runs
+on. Typing a path into the URL field does *not* do that — the server would look
+for it inside its own container. A file and a URL never apply at the same time:
+opening one clears the other, with a note saying which source is in use.
+
+The UI binds to `127.0.0.1` on purpose: it accepts ZimaOS credentials and loads
+arbitrary URLs. `--bind 0.0.0.0` works, but has to be set deliberately (and
+then needs an open ZFW port, the ZimaOS firewall (ZFW) docs).
+
+⚠️ **Running it as a ZimaOS app removes that protection: there is no login.**
+The container starts with `--bind 0.0.0.0` and the generated compose publishes
+the port on `0.0.0.0`, so every host on the LAN can call `/api/*` — measured on
+2026-07-21: `GET /api/defaults` answers 200 from another machine.
+
+This is **accepted for the time being** (decision of 2026-07-21): a real user
+management is planned and will cover it, so a login bolted on now would be
+thrown away. Know what you are running in the meantime — an unauthenticated
+caller **can**:
+
+- read the blueprint catalogue,
+- read `/api/defaults`, which includes the configured ZimaOS host and the SSH
+  user name,
+- make the server fetch any URL they name, which turns zimapp into a probe for
+  hosts they cannot reach themselves (a refused port and a live HTTP service give
+  different answers).
+
+They **cannot** install or uninstall anything without their own ZimaOS
+credentials, cannot read arbitrary files (blueprint names can no longer be
+paths), and cannot see the values inside a saved blueprint (the listing omits
+`vars`/`env` on purpose, pinned by a test).
+
+Want it closed before then? Publish the port on `127.0.0.1` and reach it over SSH
+or Tailscale, or put an authenticating reverse proxy in front.
+
+## Operating on ZimaOS
+
+zimapp installs itself as a ZimaOS app — tile in the grid, autostart after
+reboot, no registry account needed:
+
+```bash
+# 1. Put the build context on the host and build it there
+ssh youruser@192.168.1.100 'mkdir -p /DATA/AppData/zimapp/src'
+scp Dockerfile zimapp*.py youruser@192.168.1.100:/DATA/AppData/zimapp/src/
+scp -r static youruser@192.168.1.100:/DATA/AppData/zimapp/src/
+ssh youruser@192.168.1.100 'export DOCKER_CONFIG=/DATA/AppData/.dockercfg; \
+    cd /DATA/AppData/zimapp/src && docker build -t zimapp:local .'
+
+# 2. Generate own compose and install
+python3 zimapp.py convert zimapp-src.yml --name zimapp --title zimapp \
+    --category Developer --icon "http://192.168.1.100:8790/icon.svg" \
+    --no-icon-check -o zimapp-app.yml           # icon only exists after startup
+python3 zimapp.py install zimapp-app.yml
+```
+
+Then: **<http://192.168.1.100:8790>**, tile "zimapp" in the ZimaOS grid.
+
+🔴 **After a rebuild, `docker restart` is not enough** — the existing container
+keeps running with the old image. A new image needs a recreate.
+
+🔴 **`uninstall` deletes the image the container was created from** — by ID, not
+by tag (verified 2026-07-19). So the recreate loop is **rebuild → uninstall →
+install**, never the other way round:
+
+- `build → install → uninstall` leaves the tag **gone**, and the next install has
+  nothing to start from. There is no error anywhere; the app simply never appears
+  in the grid.
+- `rebuild → uninstall` moves the tag to a fresh image ID first, so the deletion
+  hits the old, now-dangling one and the tag survives.
+
+`install` catches the broken case and names the missing image. Images that come
+from a registry are unaffected — the next install just pulls them again.
+
+For apps that hold data, `uninstall` also removes `/DATA/AppData/<app>/`
+(`delete_config_folder=true`) — so this loop is only harmless for stateless apps
+like zimapp itself.
+
+**What does not work inside the container:** `inspect` and `generate` (the
+single-image path) need SSH to the host — the image ships no SSH client at all.
+Converting, validating, the port check and installing work fully.
+
+## CLI
+
+```bash
+export ZIMA_HOST=192.168.1.100
+export ZIMA_USER=youruser
+export ZIMA_PASS='…'
+
+# compose URL → ZimaOS app (the main path)
+python3 zimapp.py convert \
+    https://github.com/immich-app/immich/blob/main/docker/docker-compose.yml \
+    --name immich --title "Immich" --category Photography \
+    --icon "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/immich.svg" -o immich.yml
+# (icon.casaos.io has no immich.png — measured 404 on 2026-07-21. The web UI
+#  looks an icon up automatically; on the CLI, check the URL before using it.)
+
+# set values for ${VARIABLES} from the source (otherwise: default, otherwise a
+# random value for passwords, otherwise an error)
+python3 zimapp.py convert <url> --var DB_USERNAME=immich --var TZ=Europe/Berlin
+
+# Dockerfile URL — needs a prebuilt image, ZimaOS does not build
+python3 zimapp.py convert <dockerfile-url> --image ghcr.io/dir/app:1.2 --port 8080
+
+# single image (reads EXPOSE/VOLUME/ENV via SSH from the host)
+python3 zimapp.py inspect  louislam/uptime-kuma:1
+python3 zimapp.py generate louislam/uptime-kuma:1 --title "Uptime Kuma" > kuma.yml
+
+# validate, install, remove
+python3 zimapp.py validate  immich.yml
+python3 zimapp.py install   immich.yml     # waits and checks; --no-wait skips that
+python3 zimapp.py uninstall immich
+```
+
+### After the install
+
+`install` does not stop at the API's "accepted". It polls the app grid until the
+app reports `running`, then probes the port, and — if a blueprint of that name
+exists — runs its expectations:
+
+```text
+Waiting for the app (HTTP 200 means accepted, not done)…
+  t+   0s  not in the grid yet
+  t+   3s  running
+  [ok  ] app in the grid — status 'running' after 3s
+  [ok  ] reachable at http://192.168.1.100:8790 — HTTP 200
+```
+
+When something fails, the check names the cause instead of the symptom:
+
+| Symptom | What it reports |
+| --- | --- |
+| app never appears | which referenced images are missing on the host (and that `uninstall` deleted them) |
+| port unreachable, ZFW active | open the port, then `zfw apply` **and** `zfw commit` — without apply the rule does nothing (§13.2.2) |
+| port unreachable, no ZFW | not the firewall — check `docker logs` |
+| no SSH for the diagnosis | says so, instead of guessing |
+
+## Blueprints — and what "tested" is allowed to mean
+
+A blueprint is **not** a stored compose file. It holds only what cannot be
+derived from upstream, plus the expectations that get executed against the
+running installation:
+
+```bash
+python3 zimapp.py blueprints                          # catalogue + how old each proof is
+python3 zimapp.py convert --blueprint paperless-ngx -o app.yml
+python3 zimapp.py install app.yml
+python3 zimapp.py verify paperless-ngx                # runs the expect block live
+```
+
+Why a delta and not a copy: upstream changes image tags, volume paths and env
+names. A stored compose rots silently and hands out a "tested" file months later
+that no longer matches reality. A blueprint pins the source (`pin: <commit>`) and
+stores only the difference.
+
+What the converter cannot know, and a blueprint supplies — all of it observed on
+paperless-ngx: upstream's `env_file` contains nothing but comments, so the stack
+starts with **no admin account**; `PAPERLESS_URL` must carry host *and* port or
+Django rejects the login POST (§4.4.2); the secret key defaults to a published
+value.
+
+`${generate:N}`, `${host}`, `${port}`, `${app}` and `${scheme}` are expanded
+**after** the conversion — only then is the assigned host port known, and
+`PAPERLESS_URL` needs exactly that one, not the port upstream happened to use.
+
+### Saving one from the web UI
+
+**Save as blueprint** in step 6 stores the current form — source URL, metadata,
+the values that were typed. Not the generated compose: a stored compose is the
+copy this whole section argues against.
+
+Set `ZIMAPP_BLUEPRINT_DIR` to a writable directory and mount it into the
+container; without it the button says saving is off, because the directory in the
+image is read-only and disappears with the next container recreate:
+
+```yaml
+    environment:
+      - ZIMAPP_BLUEPRINT_DIR=/blueprints
+    volumes:
+      - type: bind
+        source: /DATA/AppData/zimapp/blueprints   # any path — an encrypted folder works
+        target: /blueprints
+```
+
+The directory has to be writable **by the uid the container runs as** (1000
+here), not by the user who created it. Saved blueprints carry **no `verified:`
+block** — that field is for what was actually observed, so it stays absent until
+`zimapp verify` has run and something really held. Files are written 0660, and
+values that look like secrets are named after saving; `${generate:24}` instead of
+a literal password stores nothing sensitive at all.
+
+### The expect block
+
+```yaml
+expect:
+  - http: /accounts/login/
+    status: 200
+    contains: [csrfmiddlewaretoken, 'name="login"']   # the form really rendered
+    absent: [Internal Server Error]
+    min_bytes: 500
+  - http: /api/ui_settings/
+    status: 401        # API is up and enforcing auth
+  - http: /
+    status: 302        # unauthenticated root redirects
+```
+
+Assertions are on the **payload**, not just the status code — an app answering
+200 with an empty body is broken, and a status-only check would call it healthy.
+Redirects are **not** followed by default (`follow: true` opts in), otherwise a
+302 would silently arrive as the 200 of its target.
+
+`verify` exits non-zero when an expectation fails, so it works in CI. Each
+blueprint records what was actually observed and when:
+
+```yaml
+verified:
+  date: 2026-07-19
+  host: ZimaOS v1.7.0-beta1 (192.168.1.100)   # NB: 'host', not 'on' — see below
+  result: >-
+    Converted, installed, all three containers up, webserver healthy, tile in
+    the grid, superuser login proven via POST (302).
+```
+
+⚠️ Two YAML traps that bit us here: a bare `on:` is the **boolean True** in
+YAML 1.1 (so `verified.on` is unreadable by name), and an unquoted `2026-07-19`
+becomes a `datetime.date` that `json.dumps` refuses — which took down
+`/api/defaults` with an empty response. Both are covered by tests now.
+
+## What the converter translates
+
+| From the source | Becomes |
+| --- | --- |
+| multiple services | one app; `x-casaos.main` = WebUI service, all in one bridge network |
+| `ports: ["8080:80"]` | long form with `published: "8080"` (string!) + `port_map` |
+| host port taken or reserved by ZimaOS | next free port, with a note (see "Port check" below) |
+| named volume `pgdata:` | bind to `/DATA/AppData/<app>/pgdata` |
+| relative bind `./data` | bind to `/DATA/AppData/<app>/data` |
+| absolute bind `/srv/app/data` | bind to `/DATA/AppData/<app>/data`, every move named in the notes — ZimaOS' root is read-only, docker cannot create the directory and the container would not start |
+| `/media/*`, `/mnt/*` | stays unchanged (real host locations) |
+| `/var/run/docker.sock`, `/dev/*`, `/etc/localtime` | stays unchanged (socket/device/clock) |
+| `env_file: .env` | the file next to the source is fetched, values move into `environment` |
+| `${DB_PASSWORD}` without a default | random value, reported in cleartext |
+| `${FOO:-bar}` | `bar` |
+| `${FOO:-bar}` **and** `FOO=baz` in the env file | `baz` — the env file wins, exactly as compose reads a `.env`. The form shows `baz` and names the default it overrides |
+| a value typed into the field | wins over both, and lands in `image:` **and** `environment:` |
+| `build:` | error — ZimaOS only installs prebuilt images (§4.4.1) |
+| image name | app ID (`immich-server` → `immich`), title, directory name |
+
+The WebUI service is not guessed, but derived: services with known
+infrastructure images (postgres, redis, valkey, meilisearch …) are not eligible
+for it. Can be overridden manually via `--main` or the dropdown.
+
+### Port check
+
+`--check-ports` reads the taken host ports from two sources and uses whichever
+answers. Neither is complete on its own, so the output always names the source:
+
+| Source | Needs | Sees | Blind to |
+| --- | --- | --- | --- |
+| app grid API (`--port-source api`) | credentials | ZimaOS-managed apps | foreign containers, host-native services |
+| docker via SSH (`--port-source ssh`) | key login | every published container port | host-native services |
+
+`auto` (the default) tries both. Ports ZimaOS occupies itself (22, 80, 443,
+7681 …) are hardcoded and always avoided. If **no** source works, that is an
+error — a port check that silently returns "nothing taken" is worse than none.
+
+The API path is what makes the containerised zimapp useful: the image has no
+SSH client, so `ssh` degrades to a visible note and the API carries the check.
+
+## The rules the validator enforces
+
+All verified on the live system, not copied from the docs:
+
+1. **Auth:** the JWT belongs **raw** in the `Authorization` header. With the prefix `Bearer` including the space
+   ZimaOS answers `invalid or expired jwt` — looks like a token problem,
+   but is a header format problem.
+2. **Install:** `POST /v2/app_management/compose`, `Content-Type: application/yaml`,
+   body = raw compose.
+3. **Uninstall:** `DELETE /v2/app_management/compose/{name}?delete_config_folder=true`
+4. **Top-level `name:`** is mandatory — that is the app ID and the directory name.
+5. 🔴 **`port_map` MUST be a string.** An int breaks the parser, and the app
+   then disappears **silently** from the grid. Also applies to `published:`.
+6. 🔴 **Decimal numbers need a period.** `memory: 14,92GB` → HTTP 400
+   (`strconv.ParseFloat`). See "Known ZimaOS bug" below.
+7. **Persistent data to `/DATA/AppData/<app>/`.** Drive-letter paths
+   (`/media/sdb/…`) break after a reboot — use UUID-based paths.
+   🔴 Absolute binds outside `/DATA` are moved under `/DATA/AppData/<app>/`,
+   and each move is named. Two different reasons, both measured on 1.7.0-beta1:
+   `/srv` and `/usr/local` are **not creatable** (root mounted read-only, docker
+   fails at `mkdir /srv: read-only file system` and the container never starts),
+   while `/etc`, `/opt` and `/var/lib` *are* writable as root but lie outside
+   the app data area and are not persistence-safe. Untouched: `/media`, `/mnt`,
+   sockets, devices, `/etc/localtime`, `/etc/timezone` and `/var/lib/docker`
+   (the daemon's own state — an app mounting it means exactly that directory).
+   If the source path already holds data, copy it over by hand.
+8. **`icon` must be a reachable URL**, otherwise the tile stays empty.
+   The validator checks this with a HEAD request and falls back to GET, because
+   many small servers answer HEAD with 501. ⚠️ The CasaOS URL that reads like the
+   obvious default, `…/all/default.png`, **404s** (checked 2026-07-19).
+   🔴 **Reachable is not the same as right.** `…/all/box.png` resolves, so it
+   passes this check — and puts the **Box.com logo** on the tile. It was the
+   form's prefilled default until 2026-07-21 and shipped an Immich install that
+   way. The field is empty now; after *Analyze*, zimapp looks the app id up at
+   `icon.casaos.io`, then at `selfh.st/icons`, and only fills in what really
+   answers. Nothing found → the field stays empty and says so. An empty tile is
+   visible; a foreign logo looks like it worked.
+
+Additionally validated: `x-casaos.main` points to an existing service,
+`port_map` really is one of its published ports, no duplicate or
+ZimaOS-reserved host ports, no `build:`, no `env_file:`, no
+relative binds, no unresolved `${VAR}`, no `depends_on` pointing at nothing.
+
+## Known ZimaOS bug (v1.7.0-beta1)
+
+The built-in "Benutzerdefinierte App installieren" UI (that is the label a German
+browser locale shows — which is the whole point here) is **unusable in a German
+browser locale**. It generates the memory limit with a
+decimal comma (`memory: 14,92GB`), the Go backend parses it with
+`strconv.ParseFloat` and rejects every installation:
+
+```text
+1 error(s) decoding:
+* error decoding 'deploy.resources.limits.memory':
+  strconv.ParseFloat: parsing "14,92": invalid syntax
+```
+
+Reproduced with two identical payloads that differ only in the separator:
+comma → HTTP 400, period → HTTP 200.
+
+`zimapp` is not affected by this, because it always writes values with a period
+and validates that before sending.
+
+## Tests
+
+```bash
+python3 -m unittest -v test_zimapp     # 72 tests, without network and without host
+```
+
+Every test pins down a rule that has caused trouble before. Whoever changes a
+rule has to come by there.
+
+## Limitations
+
+- **A Dockerfile is not built.** ZimaOS only installs prebuilt images
+  (§4.4.1), which is why the Dockerfile source needs an `--image`. From the
+  Dockerfile only `EXPOSE`/`VOLUME`/`ENV` are taken.
+- **Network aliases and multiple networks are merged into one bridge
+  network.** Service-to-service DNS via the service name is preserved;
+  whoever builds on aliases has to rework it.
+- **`docker inspect` runs on the ZimaOS host** via SSH — key login must be
+  set up there (our ZimaOS notes §26.3/§26.4). Only `inspect`,
+  `generate` and `--check-ports` need that; `convert` works without a host.
+- **Do not forget after the deploy:** open the ZFW port, otherwise LAN timeout
+  despite running containers (§13.2.2).
+
+## Files
+
+| File | Content |
+| --- | --- |
+| `zimapp.py` | CLI + the eight rules as a comment |
+| `zimapp_core.py` | converter: fetch, detect, variables, rewrite, validate, API |
+| `zimapp_web.py` | HTTP server and JSON API of the web UI |
+| `static/` | UI (`index.html`, `app.js`, `styles.css` in the ZFW color scheme) |
+| `test_zimapp.py` | regression tests |
+| `Dockerfile`, `zimapp-src.yml` | build and deployment as a ZimaOS app |

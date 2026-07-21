@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="zimapp">
+  <!--
+    Self-hosted icon: the tile in the ZimaOS grid needs a reachable URL
+    (Rule 8). A third-party CDN would be a dependency that breaks exactly
+    when nobody is looking — the app would rather serve it itself under
+    /icon.svg. Colors from the ZFW dashboard.
+  -->
+  <rect width="512" height="512" rx="112" fill="#234B3E"/>
+  <!-- Container box: the source -->
+  <g fill="none" stroke="#DCEFE5" stroke-width="26" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M104 176 L184 132 L264 176 L184 220 Z"/>
+    <path d="M104 176 L104 268 L184 312 L184 220"/>
+    <path d="M264 176 L264 268 L184 312"/>
+  </g>
+  <!-- Arrow: the conversion -->
+  <path d="M296 222 L392 222" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"/>
+  <path d="M366 192 L400 222 L366 252" fill="none" stroke="#FFFFFF" stroke-width="26"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Tile: the target -->
+  <rect x="300" y="296" width="108" height="108" rx="26" fill="#DCEFE5"/>
+  <circle cx="354" cy="350" r="24" fill="#234B3E"/>
+</svg>

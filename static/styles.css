@@ -1,0 +1,194 @@
+/*
+ * zimapp — design tokens taken 1:1 from the ZFW firewall dashboard
+ * (zfw/raw/usr/share/casaos/www/modules/zfw/styles.css): warm off-white as the
+ * page background, white cards with 18px corners on a soft shadow, forest green
+ * as the accent, pill badges with tinted backgrounds, Fira Sans/Fira Code.
+ *
+ * No webfont import: same reasoning as in ZFW — an admin page must not contact a
+ * third-party host on every load, and on an offline LAN an @import blocks the
+ * first paint until the timeout. The stacks fall back to Fira if the host has
+ * it, otherwise to the platform UI font.
+ */
+
+:root {
+  /* surfaces */
+  --page-bg: #F5F4EE;
+  --card-bg: #FFFFFF;
+  --card-bg-accent: #234B3E;
+  --card-border: #ECE9DF;
+  --card-radius: 18px;
+  --card-radius-sm: 12px;
+  --card-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 6px 18px rgba(15, 23, 42, .05);
+  --card-shadow-hover: 0 1px 2px rgba(15, 23, 42, .05), 0 10px 24px rgba(15, 23, 42, .08);
+
+  /* text */
+  --text: #0F1F1A;
+  --text-muted: #6B7280;
+  --text-on-accent: #FFFFFF;
+
+  /* accent — primary green */
+  --accent: #234B3E;
+  --accent-hover: #1A3A2F;
+  --accent-tint: #DCEFE5;
+  --accent-ring: rgba(35, 75, 62, .18);
+
+  /* semantic */
+  --success: #166534;
+  --success-tint: #DCFCE7;
+  --warn: #B45309;
+  --warn-tint: #FEF3C7;
+  --danger: #B91C1C;
+  --danger-tint: #FEE2E2;
+  --neutral-tint: #F1F5F9;
+
+  /* fonts */
+  --font-sans: "Fira Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Fira Code", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
+
+html, body { background: var(--page-bg); }
+body {
+  font-family: var(--font-sans);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 28px 32px 64px;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1100px; margin: 0 auto; }
+
+/* ---------- header ---------- */
+header { margin-bottom: 22px; }
+.title-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+header h1 { font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
+.version {
+  font-size: 11px; color: var(--accent); font-weight: 600;
+  background: var(--accent-tint); border-radius: 999px; padding: 3px 10px;
+}
+.subtitle { color: var(--text-muted); margin-top: 6px; font-size: 14px; max-width: 64em; }
+
+/* ---------- steps ---------- */
+.steps { display: flex; gap: 8px; margin: 18px 0 20px; flex-wrap: wrap; }
+.step {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  border-radius: 999px; padding: 6px 14px 6px 8px;
+  font-size: 12px; color: var(--text-muted);
+}
+.step .num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 999px;
+  background: var(--neutral-tint); color: var(--text-muted);
+  font-size: 11px; font-weight: 600;
+}
+.step.active { border-color: var(--accent); color: var(--accent); background: var(--accent-tint); }
+.step.active .num { background: var(--accent); color: var(--text-on-accent); }
+.step.done .num { background: var(--success-tint); color: var(--success); }
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: 18px 20px; margin-bottom: 14px;
+  box-shadow: var(--card-shadow);
+}
+.card h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.card h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.panel-hint { color: var(--text-muted); font-size: 13px; margin-bottom: 14px; max-width: 70em; }
+
+/* ---------- forms ---------- */
+.fld { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.fld label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.fld .hint { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+input[type=text], input[type=password], input[type=url], select, textarea {
+  font-family: var(--font-sans); font-size: 13px; color: var(--text);
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  border-radius: var(--card-radius-sm); padding: 9px 12px; width: 100%;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent-ring); outline-offset: 2px;
+}
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 16px; }
+.row-inline { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+.row-inline .fld { flex: 1 1 320px; margin-bottom: 0; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); }
+
+/* ---------- buttons ---------- */
+button {
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  padding: 9px 16px; border-radius: var(--card-radius-sm);
+  border: 1px solid var(--card-border); background: var(--card-bg);
+  color: var(--text); cursor: pointer; transition: background .15s ease, border-color .15s ease;
+}
+button:hover { background: var(--neutral-tint); }
+.btn-primary {
+  background: var(--accent); color: var(--text-on-accent); border-color: var(--accent);
+  box-shadow: 0 1px 2px rgba(35, 75, 62, .15);
+}
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-danger { color: var(--danger); border-color: #F3D5D5; }
+.btn-danger:hover { background: var(--danger-tint); border-color: #E9B9B9; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.action-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
+
+/* ---------- badges ---------- */
+.badge {
+  display: inline-block; font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 999px; letter-spacing: .2px;
+}
+.badge-main    { background: var(--accent-tint);  color: var(--accent);  }
+.badge-support { background: var(--neutral-tint); color: var(--text-muted); }
+.badge-ok      { background: var(--success-tint); color: var(--success); }
+.badge-warn    { background: var(--warn-tint);    color: var(--warn);    }
+.badge-err     { background: var(--danger-tint);  color: var(--danger);  }
+
+/* ---------- service list ---------- */
+.svc-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.svc {
+  border: 1px solid var(--card-border); border-radius: var(--card-radius-sm);
+  padding: 12px 14px; background: var(--card-bg);
+}
+.svc.is-main { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.svc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.svc-name { font-weight: 600; font-size: 14px; }
+.svc dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; color: var(--text-muted); }
+.svc dt { font-weight: 600; }
+.svc dd { font-family: var(--font-mono); font-size: 11.5px; word-break: break-all; }
+
+/* ---------- messages ---------- */
+.msg { border-radius: var(--card-radius-sm); padding: 10px 14px; font-size: 13px; margin-bottom: 8px; }
+.msg-err  { background: var(--danger-tint);  color: var(--danger);  }
+.msg-warn { background: var(--warn-tint);    color: var(--warn);    }
+.msg-ok   { background: var(--success-tint); color: var(--success); }
+.msg-list { list-style: none; }
+.msg-list li { margin-bottom: 6px; }
+.msg code { font-family: var(--font-mono); font-size: 12px; }
+
+/* ---------- output ---------- */
+.output {
+  background: #F8F6F0; border: 1px solid var(--card-border);
+  border-radius: var(--card-radius-sm); padding: 14px;
+  font-family: var(--font-mono); font-size: 12px;
+  color: var(--text); white-space: pre-wrap; overflow-x: auto;
+  line-height: 1.6; max-height: 520px;
+}
+textarea.output { white-space: pre; min-height: 380px; resize: vertical; }
+.secrets { background: var(--warn-tint); color: var(--warn); }
+.secrets dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-family: var(--font-mono); font-size: 12px; }
+
+.loading { color: var(--text-muted); font-size: 13px; }
+.spinner {
+  display: inline-block; width: 12px; height: 12px; border-radius: 999px;
+  border: 2px solid var(--accent-ring); border-top-color: var(--accent);
+  animation: spin .7s linear infinite; vertical-align: -1px; margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+footer { color: var(--text-muted); font-size: 12px; margin-top: 26px; }
+footer code { font-family: var(--font-mono); }

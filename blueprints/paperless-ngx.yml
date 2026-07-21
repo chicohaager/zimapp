@@ -1,0 +1,63 @@
+# Paperless-ngx — document archive with OCR (webserver + postgres + redis).
+#
+# What this blueprint adds on top of the upstream compose, and why the
+# converter cannot know it:
+#   - Upstream ships an env_file that contains nothing but comments, so the
+#     stack comes up with no admin account at all. It runs, it answers HTTP 200,
+#     and nobody can log in.
+#   - PAPERLESS_URL has to carry the external host AND port, otherwise Django's
+#     origin check rejects the login POST (ZIMAOS-KNOWLEDGE.md §4.4.2).
+#   - PAPERLESS_SECRET_KEY defaults to a well-known value upstream.
+
+name: paperless-ngx
+title: Paperless-ngx
+category: Documents
+tagline: Document archive with OCR
+description: >-
+  Scan documents, make them searchable via OCR and archive them.
+  Postgres and Redis are part of the same ZimaOS app.
+icon: https://icon.casaos.io/main/all/paperless.png
+
+source: https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/main/docker/compose/docker-compose.postgres.yml
+# pin: <commit-sha>   # set this to stop tracking a moving branch
+
+main: webserver
+memory: 4GB
+cpus: "2.00"
+
+env:
+  webserver:
+    PAPERLESS_TIME_ZONE: Europe/Berlin
+    PAPERLESS_OCR_LANGUAGE: deu+eng
+    PAPERLESS_SECRET_KEY: ${generate:48}
+    PAPERLESS_ADMIN_USER: admin
+    PAPERLESS_ADMIN_PASSWORD: ${generate:18}
+    # Needs host and port, not just the host — see §4.4.2.
+    PAPERLESS_URL: ${scheme}://${host}:${port}
+
+# Executed by `zimapp verify paperless-ngx`. Payload assertions, not just
+# status codes: an app answering 200 with an empty body is broken.
+expect:
+  - http: /accounts/login/
+    status: 200
+    contains:
+      - csrfmiddlewaretoken      # the login form really rendered
+      - 'name="login"'           # django-allauth field name, NOT "username"
+    absent:
+      - Internal Server Error
+    min_bytes: 500
+  - http: /api/ui_settings/
+    status: 401                  # API is up and enforcing auth
+  - http: /
+    status: 302                  # unauthenticated root redirects to the login
+
+# What was actually verified, and when. Not "works" — only what was observed.
+# NB: the key is `host`, not `on` — YAML 1.1 parses a bare `on` as the boolean
+# True, so `verified.on` would silently never be readable by name.
+verified:
+  date: 2026-07-19
+  host: ZimaOS v1.7.0-beta1 (192.168.1.147)
+  result: >-
+    Converted, installed, all three containers up, webserver healthy, tile in
+    the grid, superuser login proven via POST (302) and /api/ui_settings/
+    returning is_superuser: true.
