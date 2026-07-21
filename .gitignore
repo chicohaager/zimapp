@@ -1,0 +1,18 @@
+# Generated app definitions live at the repo root and carry real secrets in
+# cleartext (admin passwords, SECRET_KEYs of live installations). They are
+# output, not source — `zimapp.py convert` reproduces them at any time.
+# blueprints/ is NOT affected: that is the source these are generated from.
+/*.yml
+!zimapp-src.yml
+
+__pycache__/
+*.pyc
+gen.log
+
+# Internal handover notes: infrastructure details of the machine this was built
+# on, plus a section describing what an unauthenticated caller can do with an
+# exposed instance. Everything a user of this repo needs is in README.md.
+STATUS.md
+
+# Local Claude Code settings.
+.claude/
