@@ -12,6 +12,7 @@ The rules that ZimaOS acknowledges silently or cryptically are listed as RULES
 in zimapp.py and are enforced here resp. checked in validate().
 """
 
+import hashlib
 import json
 import os
 import re
@@ -1680,6 +1681,98 @@ def load_blueprint(name, allow_paths=False):
         raise ConvertError(f"Blueprint {path}: 'env' must be a mapping of service -> values.")
     bp["_path"] = path
     return bp
+
+
+def source_fingerprint(text):
+    """sha256 of an upstream source, line endings normalised.
+
+    Deliberately a hash and not a copy: storing the converted compose is what
+    makes a catalogue rot (see the note above BLUEPRINT_DIR). A fingerprint
+    stores no content — it only answers "is this still the file I proved against",
+    and that is exactly what a stale "tested" badge cannot answer by itself.
+    """
+    normalised = "\n".join((text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+def check_blueprint_drift(name, host="zimaos.local"):
+    """Has upstream moved under a blueprint, and does it still convert cleanly?
+
+    Needs the network, but no ZimaOS host — which is the point: this is the part
+    that can run in a CI. What it CANNOT see is the installation; a blueprint
+    that converts fine can still be broken on the live system. The result says
+    so rather than implying a completeness it does not have.
+
+    Returns a dict with status in ok / moved / broken / unrecorded.
+    """
+    result = {"name": name, "status": "ok", "notes": [], "problems": [],
+              "source": None, "pinned": False, "fingerprint": None, "recorded": None}
+    bp = load_blueprint(name)
+    url, pinned = blueprint_source_url(bp)
+    result["source"], result["pinned"] = url, pinned
+    try:
+        text, effective = fetch_source(url)
+    except ConvertError as e:
+        result["status"] = "broken"
+        result["problems"].append(f"source not retrievable: {e}")
+        return result
+
+    result["fingerprint"] = source_fingerprint(text)
+    # str() and an explicit None check, because YAML turns an unquoted hash that
+    # happens to be all digits into an int — and a leading-zero one into 0, which
+    # is falsy. "No fingerprint recorded" and "the recorded one is 0" would then
+    # be the same thing to this code (§27.7, the same family as `on:` -> True).
+    verified = bp.get("verified") or {}
+    raw_recorded = verified.get("source_sha256")
+    recorded = "" if raw_recorded is None else str(raw_recorded).strip()
+    result["recorded"] = recorded or None
+    if recorded and not re.fullmatch(r"[0-9a-f]{64}", recorded):
+        result["notes"].append(
+            f"source_sha256 in the blueprint is not a sha256 ({recorded[:24]}…). If it was "
+            f"written unquoted and consists only of digits, YAML made a number out of it — "
+            f"quote it.")
+    if not recorded:
+        result["status"] = "unrecorded"
+        result["notes"].append(
+            "no source_sha256 in the verified block — there is nothing to compare against. "
+            f"Add 'source_sha256: {result['fingerprint']}' once the blueprint has been proven.")
+    elif recorded != result["fingerprint"]:
+        seen = verified.get("source_seen")
+        result["status"] = "moved"
+        result["notes"].append(
+            f"upstream has changed since it was last looked at"
+            + (f" on {seen}" if seen else "")
+            + f" ({recorded[:12]}… -> {result['fingerprint'][:12]}…)"
+            + (" — and the source is PINNED, so the pin does not hold what it promises"
+               if pinned else "") + ".")
+
+    # Convert it the way `convert --blueprint` would, and validate the result.
+    # A source that moved is not automatically broken, and one that did not move
+    # can still stop converting when zimapp itself changes.
+    meta = {k: bp[k] for k in ("name", "title", "category", "tagline", "description",
+                               "icon", "memory", "cpus", "main") if bp.get(k)}
+    try:
+        compose, info = build_from_source(url, meta, dict(bp.get("vars") or {}),
+                                          {"autofill_secrets": True, "check_icon": False})
+        if bp.get("env"):
+            # The port has to be the one the conversion actually assigned. Feeding
+            # a placeholder here would build a ${port} into PAPERLESS_URL that does
+            # not match the published port — and the validator would then report a
+            # trap that this check invented itself.
+            doc = yaml.safe_load(compose)
+            apply_blueprint_env(doc, bp, host, info["web_port"], info["app_id"])
+            compose = dump(doc)
+        problems, warnings = validate(compose)
+    except ConvertError as e:
+        result["status"] = "broken"
+        result["problems"].append(f"conversion fails: {e}")
+        return result
+
+    result["problems"] += problems
+    result["notes"] += [f"validator: {w}" for w in warnings]
+    if problems:
+        result["status"] = "broken"
+    return result
 
 
 def blueprint_source_url(bp):
