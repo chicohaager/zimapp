@@ -94,6 +94,12 @@ without ZimaOS, and without publishing anything to the network:
 docker run --rm -p 127.0.0.1:8790:8790 chicohaager/zimapp:latest
 ```
 
+⚠️ **`update`, `drift` and the three framework checks are in `main`, not yet in
+the released `2.0.0` image.** Whoever installs the image above gets the state of
+the tag — the *Compare with installation* button is not in it. From a checkout
+everything described here is there; the UI says `v2.1-dev` instead of `v2.0` so
+the two cannot be confused.
+
 The bind mount in it is where **Save as blueprint** writes; ZimaOS creates the
 directory on first install (measured 2026-07-21: `root:root`, mode 777, so the
 container's own user can write in it). Without that mount, saving is switched
@@ -523,7 +529,7 @@ and validates that before sending.
 ## Tests
 
 ```bash
-python3 -m unittest -v test_zimapp     # 72 tests, without network and without host
+python3 -m unittest -v test_zimapp     # 175 tests, without network and without host
 ```
 
 Every test pins down a rule that has caused trouble before. Whoever changes a
@@ -552,4 +558,8 @@ rule has to come by there.
 | `zimapp_web.py` | HTTP server and JSON API of the web UI |
 | `static/` | UI (`index.html`, `app.js`, `styles.css` in the ZFW color scheme) |
 | `test_zimapp.py` | regression tests |
+| `blueprints/` | tested recipes: pinned source, the values an app needs, expectations |
+| `zimapp-zimaos.yml` | ready-to-install ZimaOS compose on the released image |
 | `Dockerfile`, `zimapp-src.yml` | build and deployment as a ZimaOS app |
+| `docs/` | the screenshots in this README |
+| `.github/workflows/` | the weekly blueprint drift check |
