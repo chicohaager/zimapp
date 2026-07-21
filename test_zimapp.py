@@ -1631,5 +1631,98 @@ class UpdateReviewFindings(unittest.TestCase):
 
 
 
+
+class FrameworkTraps(unittest.TestCase):
+    """Three ways an app comes up healthy and is still unusable.
+
+    ZimaOS sees none of them: container running, port answering, tile there.
+    The checks read their evidence out of the compose — none of them guesses a
+    framework from the image name, because "looks like Django" is not a
+    measurement.
+    """
+
+    def _svc(self, env, ports=None):
+        return {"app": {"image": "x:1", "ports": ports or [
+            {"mode": "ingress", "target": 8000, "published": "8123", "protocol": "tcp"}],
+            "environment": env}}
+
+    def test_own_url_naming_a_port_it_is_not_reachable_on(self):
+        _, warnings = core.framework_checks(self._svc(["APP_URL=http://host.lan:8000"]))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("names port 8000", warnings[0])
+        self.assertIn("8123", warnings[0])
+        self.assertIn("reverse proxy", warnings[0])      # the case where it IS correct
+
+    def test_a_matching_url_says_nothing(self):
+        problems, warnings = core.framework_checks(self._svc(["APP_URL=http://host.lan:8123"]))
+        self.assertEqual((problems, warnings), ([], []))
+
+    def test_https_without_a_port_means_443(self):
+        _, warnings = core.framework_checks(self._svc(["SITE_URL=https://host.lan"]))
+        self.assertIn("names port 443", warnings[0])
+        _, none = core.framework_checks(self._svc(
+            ["SITE_URL=https://host.lan"],
+            ports=[{"mode": "ingress", "target": 8000, "published": "443", "protocol": "tcp"}]))
+        self.assertEqual(none, [])
+
+    def test_a_url_that_is_not_a_url_is_not_guessed_at(self):
+        problems, warnings = core.framework_checks(self._svc(["APP_URL=host.lan"]))
+        self.assertEqual((problems, warnings), ([], []))
+
+    def test_a_well_known_placeholder_secret_is_an_error(self):
+        problems, _ = core.framework_checks(self._svc(["SECRET_KEY=change_me"]))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("well-known placeholder", problems[0])
+
+    def test_an_empty_secret_is_a_warning_and_not_an_error(self):
+        """Measured on the live pterodactyl install: MAIL_PASSWORD is empty on
+        purpose and everything works. Calling that an error would teach people
+        to ignore the whole class of message."""
+        problems, warnings = core.framework_checks(self._svc(["MAIL_PASSWORD="]))
+        self.assertEqual(problems, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("optional feature", warnings[0])
+
+    def test_a_generated_secret_says_nothing(self):
+        problems, warnings = core.framework_checks(
+            self._svc(["SECRET_KEY=U4UD8EnwGUoELp-5kxyA1k7lLur"]))
+        self.assertEqual((problems, warnings), ([], []))
+
+    def test_an_admin_user_without_a_password(self):
+        _, warnings = core.framework_checks(self._svc(["PAPERLESS_ADMIN_USER=admin"]))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("nobody can log in", warnings[0])
+
+    def test_a_complete_admin_account_says_nothing(self):
+        problems, warnings = core.framework_checks(
+            self._svc(["PAPERLESS_ADMIN_USER=admin", "PAPERLESS_ADMIN_PASSWORD=s3cr3t"]))
+        self.assertEqual((problems, warnings), ([], []))
+
+    def test_the_checks_reach_the_validator(self):
+        text = textwrap.dedent("""
+            name: demo
+            services:
+              app:
+                image: x:1
+                ports:
+                - mode: ingress
+                  target: 8000
+                  published: '8123'
+                  protocol: tcp
+                environment:
+                - SECRET_KEY=changeme
+            x-casaos:
+              main: app
+              port_map: '8123'
+              icon: http://i/x.png
+              title:
+                en_us: Demo
+              description:
+                en_us: Demo
+        """)
+        problems, _ = core.validate(text)
+        self.assertTrue(any("well-known placeholder" in p for p in problems), problems)
+
+
 if __name__ == "__main__":
     unittest.main()

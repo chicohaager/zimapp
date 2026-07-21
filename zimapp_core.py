@@ -86,6 +86,40 @@ TMPFS_PREFIXES = ("/tmp/", "/run/", "/var/run/")
 # Variable names for which we are allowed to generate a secret on request.
 SECRET_HINTS = ("password", "passwd", "secret", "token", "apikey", "api_key", "salt", "_key")
 
+# --- Framework traps --------------------------------------------------------
+#
+# Three ways an app comes up healthy and is still unusable. All three were hit
+# on the live system, and none of them is visible to ZimaOS: the container is
+# running, the port answers, the tile is there.
+#
+# What matters about these checks: every one of them reads its evidence out of
+# the compose file itself. None of them guesses from the image name what
+# framework might be inside — "looks like Django" is not a measurement, and a
+# warning built on it would be noise on every app it guesses wrong.
+
+# Variables through which an app is told its own external address. If one of
+# these exists, the app builds links or an origin check from it — and then the
+# value has to match the port the app is actually reachable on.
+PUBLIC_URL_HINTS = ("_url", "_origin", "_origins", "_host", "_hosts", "_domain",
+                    "_site", "site_url", "public_url", "external_url", "base_url")
+
+# Values that are in a compose only because nobody replaced them. A generated
+# secret is fine; these are the ones everybody on the internet knows.
+PLACEHOLDER_VALUES = {
+    "change_me", "changeme", "change-me", "please_change", "please-change-me",
+    "secret", "mysecret", "my_secret", "supersecret", "secretkey", "secret_key",
+    "password", "passwd", "pass", "admin", "root", "example", "test",
+    "your_secret_key", "your-secret-key", "yoursecretkey", "changeit",
+    "insecure", "todo", "xxx", "1234", "12345", "123456", "password123",
+}
+
+# Pairs that only work together: a user without a password is an app nobody can
+# log into, and the installation reports no problem whatsoever.
+ADMIN_USER_HINTS = ("admin_user", "admin_username", "admin_name", "superuser",
+                    "admin_email", "initial_admin_user")
+ADMIN_PASSWORD_HINTS = ("admin_password", "admin_pass", "superuser_password",
+                        "initial_admin_password")
+
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -1035,6 +1069,102 @@ def dump(doc):
 
 # --- Validation -------------------------------------------------------------
 
+def _published_ports(svc):
+    """The host ports a service publishes, as strings."""
+    out = set()
+    for p in (svc or {}).get("ports") or []:
+        if isinstance(p, dict):
+            if p.get("published") is not None:
+                out.add(str(p["published"]))
+        else:
+            parts = str(p).split("/")[0].split(":")
+            if len(parts) >= 2:
+                out.add(parts[-2])
+    return out
+
+
+def _url_port(value):
+    """The port an URL names, or None. '' when it names a host but no port."""
+    m = re.match(r"^\s*(https?)://([^/\s]+)", str(value or ""))
+    if not m:
+        return None
+    scheme, authority = m.group(1), m.group(2)
+    host, _, port = authority.rpartition(":")
+    if host and port.isdigit():
+        return port
+    return "443" if scheme == "https" else "80"
+
+
+def framework_checks(services):
+    """Traps that leave an app running, reachable — and unusable.
+
+    Returns (problems, warnings). Each message names the value it read, so
+    nobody has to trust the check: they can look at the same line.
+    """
+    problems, warnings = [], []
+    for name, svc in (services or {}).items():
+        svc = svc or {}
+        env = _env_dict(svc.get("environment"))
+        published = _published_ports(svc)
+
+        for key, value in sorted(env.items()):
+            lower = key.lower()
+            text = "" if value is None else str(value).strip()
+
+            # 1. The app is told its own address, and that address names a port
+            #    it is not reachable on. Django-style origin checks then reject
+            #    the login POST while everything else looks healthy (§4.4.2).
+            if any(h in lower for h in PUBLIC_URL_HINTS) and text.startswith(("http://", "https://")):
+                port = _url_port(text)
+                if published and port and port not in published:
+                    warnings.append(
+                        f"{name}: {key}={text} names port {port}, but the service is published "
+                        f"on {', '.join(sorted(published))}. An app that checks its own origin "
+                        f"(Django, Rails and friends) accepts the page and rejects the login "
+                        f"POST — it looks healthy from outside (§4.4.2). Correct as it stands "
+                        f"only if a reverse proxy answers on {port} and forwards here."
+                    )
+
+            # 2. A secret that is empty or is the value everybody knows.
+            if any(h in lower for h in SECRET_HINTS):
+                if text == "":
+                    # Deliberately a warning, not a problem: whether an empty
+                    # secret is fatal cannot be read off the file. Measured on
+                    # the live pterodactyl install, where MAIL_PASSWORD is empty
+                    # on purpose and everything works. Calling that an error
+                    # would teach people to ignore this class of message.
+                    warnings.append(
+                        f"{name}: {key} is empty. If the app needs it, it fails at a point where "
+                        f"nothing reports an error — the container runs and the port answers. If "
+                        f"it belongs to an optional feature (mail, S3, OIDC), empty is correct."
+                    )
+                elif text.lower() in PLACEHOLDER_VALUES:
+                    problems.append(
+                        f"{name}: {key}={text} is a well-known placeholder, not a secret. "
+                        f"Anyone who knows the upstream compose knows this value."
+                    )
+
+        # 3. Half an admin account: the app comes up and nobody gets in, and
+        #    nothing anywhere reports a problem.
+        user_keys = [k for k in env if any(h in k.lower() for h in ADMIN_USER_HINTS)]
+        password_keys = [k for k in env if any(h in k.lower() for h in ADMIN_PASSWORD_HINTS)]
+        has_user = any(str(env[k] or "").strip() for k in user_keys)
+        has_password = any(str(env[k] or "").strip() for k in password_keys)
+        if user_keys and has_user and not has_password:
+            warnings.append(
+                f"{name}: {', '.join(sorted(user_keys))} is set, but no admin password "
+                f"({' / '.join(sorted(password_keys)) or 'no such variable at all'}). Apps that "
+                f"create their superuser on first start then create none — the app runs and "
+                f"nobody can log in."
+            )
+        elif password_keys and has_password and not has_user:
+            warnings.append(
+                f"{name}: {', '.join(sorted(password_keys))} is set, but no admin user name. "
+                f"Whether an account is created at all depends on the app."
+            )
+    return problems, warnings
+
+
 def validate(text):
     """Checks exactly those traps that ZimaOS acknowledges silently or cryptically.
 
@@ -1160,6 +1290,12 @@ def validate(text):
         for dep in ((svc or {}).get("depends_on") or []):
             if dep not in declared:
                 problems.append(f"{name}: depends_on '{dep}' does not exist in the stack.")
+
+    # Traps that ZimaOS cannot see at all, because the container is running and
+    # the port answers — they only show up when someone tries to log in.
+    framework_problems, framework_warnings = framework_checks(services)
+    problems += framework_problems
+    warnings += framework_warnings
 
     return problems, warnings
 
