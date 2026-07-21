@@ -50,30 +50,14 @@ The UI binds to `127.0.0.1` on purpose: it accepts ZimaOS credentials and loads
 arbitrary URLs. `--bind 0.0.0.0` works, but has to be set deliberately (and
 then needs an open ZFW port, the ZimaOS firewall (ZFW) docs).
 
-⚠️ **Running it as a ZimaOS app removes that protection: there is no login.**
-The container starts with `--bind 0.0.0.0` and the generated compose publishes
-the port on `0.0.0.0`, so every host on the LAN can call `/api/*` — measured on
-2026-07-21: `GET /api/defaults` answers 200 from another machine.
+⚠️ **There is no login yet, so do not publish the port to your network.**
+Running it as a ZimaOS app does exactly that: the container binds to `0.0.0.0`
+and the generated compose publishes the port, which makes the whole API reachable
+for anyone on the LAN. A real user management is planned and will cover this.
 
-This is **accepted for the time being** (decision of 2026-07-21): a real user
-management is planned and will cover it, so a login bolted on now would be
-thrown away. Know what you are running in the meantime — an unauthenticated
-caller **can**:
-
-- read the blueprint catalogue,
-- read `/api/defaults`, which includes the configured ZimaOS host and the SSH
-  user name,
-- make the server fetch any URL they name, which turns zimapp into a probe for
-  hosts they cannot reach themselves (a refused port and a live HTTP service give
-  different answers).
-
-They **cannot** install or uninstall anything without their own ZimaOS
-credentials, cannot read arbitrary files (blueprint names can no longer be
-paths), and cannot see the values inside a saved blueprint (the listing omits
-`vars`/`env` on purpose, pinned by a test).
-
-Want it closed before then? Publish the port on `127.0.0.1` and reach it over SSH
-or Tailscale, or put an authenticating reverse proxy in front.
+Until then, publish the port on `127.0.0.1` and reach it over SSH or Tailscale,
+or put an authenticating reverse proxy in front. Installing and uninstalling
+always needs your own ZimaOS credentials, which zimapp never stores.
 
 ## Operating on ZimaOS
 
