@@ -10,6 +10,8 @@ Whoever changes a rule has to come by here.
 
 import json
 import os
+import sys
+import tempfile
 import textwrap
 import unittest
 
@@ -1545,6 +1547,87 @@ class UpdateCompletionSignal(unittest.TestCase):
                                       timeout=3, interval=3)
         self.assertFalse(result["applied"])
         self.assertIn("no container at all", result["running_problems"][0])
+
+
+
+
+class UpdateReviewFindings(unittest.TestCase):
+    """Four defects the review of `update` turned up, each measured before the fix.
+
+    They are one family: a check that silently covers less than it claims to.
+    """
+
+    def test_deploy_settings_beyond_memory_and_cpus_are_compared(self):
+        # Before the fix the comparison kept only memory/cpus, so this was []
+        # while `update` claimed to list every difference.
+        old = {"services": {"app": {"deploy": {"replicas": 1,
+                                               "restart_policy": {"condition": "any"}}}}}
+        new = {"services": {"app": {"deploy": {"replicas": 3,
+                                               "restart_policy": {"condition": "none"}}}}}
+        paths = [c["path"] for c in core.compose_diff(old, new)]
+        self.assertIn("services.app.deploy.replicas", paths)
+        self.assertIn("services.app.deploy.restart_policy.condition", paths)
+
+    def test_the_storage_format_of_deploy_is_still_no_difference(self):
+        stored = {"services": {"app": {"deploy": {"placement": {}, "resources": {
+            "limits": {"memory": "1073741824", "cpus": "1.00"}}}}}}
+        sent = {"services": {"app": {"deploy": {"resources": {
+            "limits": {"memory": "1GB", "cpus": "1.00"}}}}}}
+        self.assertEqual(core.compose_diff(stored, sent), [])
+
+    def test_normalising_does_not_change_the_document_it_was_given(self):
+        doc = {"services": {"app": {"deploy": {"placement": {}, "resources": {
+            "limits": {"memory": "1GB"}}}}}}
+        core.normalize_for_compare(doc)
+        self.assertEqual(doc["services"]["app"]["deploy"]["placement"], {})
+        self.assertEqual(doc["services"]["app"]["deploy"]["resources"]["limits"]["memory"], "1GB")
+
+    def test_a_container_the_new_definition_no_longer_has_is_reported(self):
+        desired = {"services": {"app": {"image": "x:1"}}}
+        containers = {"app": {"image": "x:1", "state": "running", "status": "Up",
+                              "exit_code": 0, "health": "", "id": "1"},
+                      "db": {"image": "postgres:18", "state": "running", "status": "Up 3 hours",
+                             "exit_code": 0, "health": "", "id": "2"}}
+        problems = core.running_mismatch(desired, containers)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("db", problems[0])
+        self.assertIn("no longer has that service", problems[0])
+
+    def test_a_secret_that_moves_to_a_renamed_service_is_called_out(self):
+        doc = {"services": {"database": {"environment": ["POSTGRES_PASSWORD=fresh"]}}}
+        installed = {"services": {"db": {"environment": {"POSTGRES_PASSWORD": "old"}}}}
+        generated = {"POSTGRES_PASSWORD": "fresh"}
+        kept = core.keep_installed_values(doc, installed, generated)
+        self.assertEqual(kept, [])          # the service name no longer matches
+        notes = core.regenerated_elsewhere(doc, installed, generated, kept)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("REGENERATED", notes[0])
+        self.assertIn("'db'", notes[0])
+        self.assertIn("'database'", notes[0])
+
+    def test_no_note_when_the_value_was_kept(self):
+        doc = {"services": {"db": {"environment": ["POSTGRES_PASSWORD=fresh"]}}}
+        installed = {"services": {"db": {"environment": {"POSTGRES_PASSWORD": "old"}}}}
+        generated = {"POSTGRES_PASSWORD": "fresh"}
+        kept = core.keep_installed_values(doc, installed, generated)
+        self.assertEqual(core.regenerated_elsewhere(doc, installed, generated, kept), [])
+
+    def test_flags_that_cannot_act_are_refused_before_the_network(self):
+        """--keep with --file was a silent no-op. It has to fail, and fail early."""
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        with tempfile.TemporaryDirectory() as tmp:
+            compose = os.path.join(tmp, "app.yml")
+            with open(compose, "w", encoding="utf-8") as fh:
+                fh.write("name: demo\nservices:\n  app:\n    image: x:1\n")
+            proc = subprocess.run(
+                [sys.executable, os.path.join(here, "zimapp.py"), "update", "demo",
+                 "--file", compose, "--keep", "SECRET",
+                 # a host that must never be contacted: the guard comes first
+                 "--host", "192.0.2.1", "--user", "u", "--pass", "p"],
+                capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--keep would do nothing", proc.stderr)
 
 
 

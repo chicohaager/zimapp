@@ -1806,15 +1806,22 @@ def normalize_for_compare(doc):
                 else:
                     clean["depends_on"] = {str(k): "service_started" for k in value or []}
             elif key == "deploy":
-                limits = ((value or {}).get("resources") or {}).get("limits") or {}
-                deploy = {}
+                # Only memory and cpus need levelling (ZimaOS stores bytes and
+                # adds an empty 'placement'). Everything else in deploy —
+                # replicas, restart_policy, reservations — is kept as it is:
+                # reducing this block to the two fields we happen to write would
+                # make a change to any other one invisible, and a diff that
+                # quietly skips part of the file is worse than no diff.
+                deploy = json.loads(json.dumps(value or {}))     # never touch the caller's doc
+                deploy.pop("placement", None)
+                limits = (deploy.get("resources") or {}).get("limits") or {}
                 if limits.get("memory") is not None:
-                    deploy["memory"] = _memory_bytes(limits["memory"])
+                    limits["memory"] = _memory_bytes(limits["memory"])
                 if limits.get("cpus") is not None:
                     try:
-                        deploy["cpus"] = float(str(limits["cpus"]).replace(",", "."))
+                        limits["cpus"] = float(str(limits["cpus"]).replace(",", "."))
                     except ValueError:
-                        deploy["cpus"] = str(limits["cpus"])
+                        limits["cpus"] = str(limits["cpus"])
                 clean["deploy"] = deploy
             else:
                 clean[key] = value
@@ -1963,6 +1970,34 @@ def keep_installed_values(doc, installed, generated, force=()):
     return sorted(set(kept))
 
 
+def regenerated_elsewhere(doc, installed, generated, kept):
+    """Generated secrets whose running value sits under a DIFFERENT service.
+
+    When upstream renames a service (db -> database), the value cannot be
+    matched and a fresh password is generated — against the old data volume.
+    It does show up in the diff, but among the many lines a rename produces it
+    is exactly the one nobody reads. So it gets said out loud.
+    """
+    existing = installed_env(installed)
+    in_new = {}
+    for service, svc in (doc.get("services") or {}).items():
+        for entry in (svc or {}).get("environment") or []:
+            key, sep, _ = str(entry).partition("=")
+            if sep:
+                in_new.setdefault(key, service)
+    notes = []
+    for key in sorted(set(generated) - set(kept)):
+        for service, values in existing.items():
+            if values.get(key) and in_new.get(key) and in_new[key] != service:
+                notes.append(
+                    f"{key} runs in service '{service}' and the new definition puts it in "
+                    f"'{in_new[key]}' — it will be REGENERATED. If '{service}' was renamed "
+                    f"upstream, carry the value over by hand (--var {key}=…), otherwise the "
+                    f"new value meets old data.")
+                break
+    return notes
+
+
 def carry_over_values(doc, variable_names):
     """Installed values for the variables the source asks for: {VAR: value}."""
     known = {}
@@ -2021,6 +2056,14 @@ def running_containers(host, name, user=None, password=None, token=None):
 def running_mismatch(desired, containers):
     """Which services do NOT run what the new compose says. [] means: they all do."""
     problems = []
+    wanted = set((desired.get("services") or {}).keys())
+    for service in sorted(set(containers) - wanted):
+        # A service the new definition no longer has, whose container is still
+        # up. Whether ZimaOS removes orphans has not been measured, so this is
+        # reported rather than assumed away — a leftover container still holds
+        # its ports and its data.
+        problems.append(f"{service}: still running ({containers[service].get('status') or '?'}) "
+                        f"although the new definition no longer has that service")
     for service, svc in (desired.get("services") or {}).items():
         want = _image_key((svc or {}).get("image"))
         actual = containers.get(service)
