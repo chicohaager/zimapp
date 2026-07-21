@@ -158,8 +158,16 @@
         <div class="fld"><label for="i-user">Username</label><input type="text" id="i-user" autocomplete="username"></div>
         <div class="fld"><label for="i-pass">Password</label><input type="password" id="i-pass" autocomplete="current-password"></div>
       </div>
+      <p class="panel-hint">
+        Already installed? <b>Compare with installation</b> reads the compose ZimaOS really
+        has and shows what would change. <b>Apply update</b> then changes it
+        <b>in place</b> (<code>PUT</code>) &mdash; images and
+        <code>/DATA/AppData/&lt;app&gt;/</code> survive, which an uninstall+install does not.
+      </p>
       <div class="action-row">
         <button class="btn-primary" id="btn-install">Install</button>
+        <button id="btn-diff">Compare with installation</button>
+        <button class="btn-primary" id="btn-update" hidden>Apply update</button>
         <button id="btn-verify" hidden>Verify installation</button>
         <button class="btn-danger" id="btn-uninstall">Uninstall (including data)</button>
       </div>
@@ -173,6 +181,6 @@
     <code>~/dev/ZIMAOS-KNOWLEDGE.md</code> §3.4, §4.4.1, §5. Color scheme taken from the ZFW dashboard.
   </footer>
 </div>
-<script src="./app.js?v=2"></script>
+<script src="./app.js?v=3"></script>
 </body>
 </html>

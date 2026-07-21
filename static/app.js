@@ -21,7 +21,11 @@ const CATEGORIES = [
 
 let state = { source: null, kind: null, services: [], variables: [], yaml: "",
               blueprint: null, blueprints: [],
-              fileText: null, fileName: null };
+              fileText: null, fileName: null,
+              // The exact compose text the update diff was computed for. "Apply"
+              // refuses anything else — a button acting on a diff nobody saw is
+              // the same mistake as a green banner with no check behind it.
+              updateDiffFor: null };
 
 // --- Helpers --------------------------------------------------------------
 
@@ -445,6 +449,110 @@ async function runPostCheck() {
   }
 }
 
+// --- 3b: update an existing app -------------------------------------------
+//
+// Deliberately two steps. "Apply" only ever sends the exact text that was
+// compared: if the textarea changed in between, the diff on screen describes
+// something else, and a button that acts on a diff nobody saw is the same
+// mistake as a green banner without a check behind it.
+
+function renderChanges(box, changes, note) {
+  const list = document.createElement("dl");
+  list.className = "changes";
+  changes.forEach((c) => {
+    const dt = document.createElement("dt");
+    dt.textContent = `${{ add: "+", remove: "−", change: "~" }[c.kind]} ${c.path}`;
+    const dd = document.createElement("dd");
+    dd.textContent = `${c.installed === null ? "(not set)" : JSON.stringify(c.installed)}`
+      + `  →  ${c.desired === null ? "(removed)" : JSON.stringify(c.desired)}`;
+    list.append(dt, dd);
+  });
+  box.appendChild(list);
+  if (note) box.appendChild(msg("warn", `Not compared: ${note}.`));
+}
+
+async function updateDiff() {
+  const box = $("install-msgs");
+  clear(box);
+  $("btn-update").hidden = true;
+  state.updateDiffFor = null;
+  const yaml = $("out-yaml").value;
+  busy($("btn-diff"), true, "Reading…");
+  try {
+    const data = await post("/api/update/diff", {
+      yaml,
+      host: $("t-host").value.trim(),
+      user: $("i-user").value,
+      password: $("i-pass").value,
+    });
+    if (!data.changes.length) {
+      box.appendChild(msg("ok", `'${data.name}' (${data.app_status}) already matches this `
+        + `compose — there is nothing to apply.`));
+      box.appendChild(msg("warn", `Not compared: ${data.not_compared}.`));
+      return;
+    }
+    box.appendChild(msg("warn", `${data.changes.length} difference(s) between the installation `
+      + `'${data.name}' (${data.app_status}) and this compose. Nothing has been sent yet.`));
+    renderChanges(box, data.changes, data.not_compared);
+    state.updateDiffFor = yaml;
+    $("btn-update").hidden = false;
+  } catch (e) {
+    box.appendChild(msg("err", e.message));
+  } finally {
+    busy($("btn-diff"), false);
+  }
+}
+
+async function updateApply() {
+  const box = $("install-msgs");
+  const out = $("install-out");
+  const yaml = $("out-yaml").value;
+  if (yaml !== state.updateDiffFor) {
+    clear(box);
+    $("btn-update").hidden = true;
+    state.updateDiffFor = null;
+    box.appendChild(msg("err", "The compose has changed since the comparison — the list above "
+      + "describes a different file. Compare again before applying."));
+    return;
+  }
+  clear(box);
+  out.hidden = false;
+  out.textContent = "Sending, then waiting until the app really runs it. HTTP 200 from ZimaOS "
+    + "means “accepted” — a change it cannot carry out looks exactly the same.";
+  busy($("btn-update"), true, "Applying…");
+  try {
+    const data = await post("/api/update/apply", {
+      yaml,
+      host: $("t-host").value.trim(),
+      user: $("i-user").value,
+      password: $("i-pass").value,
+    });
+    if (data.applied) {
+      out.textContent = `Applied after ${data.waited}s. The stored compose matches and every `
+        + `service runs the image it should.`;
+      box.appendChild(msg("ok", `'${data.name}' updated — ${data.changes.length} change(s) `
+        + `applied without uninstalling.`));
+      $("btn-update").hidden = true;
+      state.updateDiffFor = null;
+      $("btn-verify").hidden = !state.blueprint;
+    } else {
+      out.textContent = [
+        ...(data.remaining || []).map((c) =>
+          `still different: ${c.path}: ${JSON.stringify(c.installed)} != ${JSON.stringify(c.desired)}`),
+        ...(data.running_problems || []).map((p) => `RUNNING: ${p}`),
+      ].join("\n") || "(no detail returned)";
+      box.appendChild(msg("err", "The app does NOT run the new definition. Nothing was "
+        + "destroyed — the old container is still up, which is exactly why neither the app "
+        + "status nor the port shows a problem. The usual cause is an image that cannot be "
+        + "pulled."));
+    }
+  } catch (e) {
+    box.appendChild(msg("err", e.message));
+  } finally {
+    busy($("btn-update"), false);
+  }
+}
+
 async function uninstall() {
   const box = $("install-msgs");
   const out = $("install-out");
@@ -724,6 +832,8 @@ $("src-url").addEventListener("input", () => {
   }
 });
 $("btn-install").addEventListener("click", install);
+$("btn-diff").addEventListener("click", updateDiff);
+$("btn-update").addEventListener("click", updateApply);
 $("btn-uninstall").addEventListener("click", uninstall);
 $("btn-verify").addEventListener("click", verifyInstall);
 loadDefaults();
