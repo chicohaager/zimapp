@@ -285,6 +285,185 @@ def cmd_uninstall(args):
     sys.exit(0 if status == 200 else 1)
 
 
+def _update_source(args, installed):
+    """Where the new definition comes from — never guessed.
+
+    Order: an explicit file, an explicit URL, an explicit blueprint, a blueprint
+    that carries the app's own name. If none of those exist, the command says so
+    instead of inventing a source.
+    """
+    if args.file:
+        with open(args.file, encoding="utf-8") as fh:
+            return fh.read(), f"file {args.file}", None
+    blueprint = None
+    if args.blueprint:
+        blueprint = core.load_blueprint(args.blueprint, allow_paths=True)
+    elif not args.source and os.path.isfile(core.blueprint_path(args.name)):
+        blueprint = core.load_blueprint(args.name)
+        print(f"Using the blueprint of the same name: {blueprint['_path']}", file=sys.stderr)
+    url = args.source
+    if blueprint:
+        url, pinned = core.blueprint_source_url(blueprint)
+        print(f"Blueprint source: {url}" + (" (pinned)" if pinned else " (moving branch)"),
+              file=sys.stderr)
+    if not url:
+        die(f"No source for '{args.name}'. Say where the new definition comes from: "
+            f"--source <URL>, --blueprint <name>, or --file <compose.yml>. "
+            f"There is no blueprint called '{args.name}' to fall back on.")
+
+    meta = core.meta_from_installed(installed)
+    if blueprint:
+        for key in ("title", "category", "tagline", "description", "icon",
+                    "memory", "cpus", "main"):
+            if blueprint.get(key):
+                meta[key] = blueprint[key]
+    for key in ("title", "author", "category", "tagline", "description", "icon",
+                "memory", "cpus", "main"):
+        value = getattr(args, key, None)
+        if value:
+            meta[key] = value
+    meta["name"] = args.name          # update never renames — that would be a new app
+
+    # Values that already run must survive. A freshly generated POSTGRES_PASSWORD
+    # against an existing database volume means the app never comes up again.
+    source_text, _ = core.fetch_source(url)
+    names = {v["name"] for v in core.find_variables(source_text)}
+    variables = core.carry_over_values(installed, names)
+    kept = sorted(variables)
+    if blueprint:
+        variables.update(blueprint.get("vars") or {})
+    for item in args.var or []:
+        if "=" not in item:
+            die(f"--var expects NAME=VALUE, got: {item}")
+        key, _, value = item.partition("=")
+        variables[key] = value
+    if kept:
+        print(f"Kept from the installation: {', '.join(kept)}", file=sys.stderr)
+
+    text, info = core.build_from_source(
+        url, meta, variables,
+        {"autofill_secrets": True, "check_icon": not args.no_icon_check},
+    )
+    doc = core.yaml.safe_load(text)
+    if blueprint and blueprint.get("env"):
+        info["generated"].update(core.apply_blueprint_env(
+            doc, blueprint, args.host, info["web_port"], info["app_id"]))
+
+    # A regenerated password is not a new password, it is a broken app. Values
+    # that already run win over anything that was generated here.
+    restored = core.keep_installed_values(doc, installed, info["generated"],
+                                          force=args.keep or ())
+    for key in restored:
+        info["generated"].pop(key, None)
+    text = core.dump(doc)
+    info["problems"], extra = core.validate(text)
+    info["warnings"] += extra
+
+    if restored:
+        print(f"Kept from the installation instead of regenerating: {', '.join(restored)}",
+              file=sys.stderr)
+    if info["generated"]:
+        print("Newly generated secrets (they exist nowhere else — note them down):", file=sys.stderr)
+        for key, value in info["generated"].items():
+            print(f"  {key}={value}", file=sys.stderr)
+    report(info["problems"], info["warnings"])
+    if info["problems"]:
+        die("the newly generated compose is not ZimaOS-compliant — see the errors above.")
+    return text, info["source"], info
+
+
+def cmd_update(args):
+    """Change an installed app in place: read back → compare → apply.
+
+    The starting point is what ZimaOS actually has, not a file lying around
+    here: a `uninstall` + `install` round would delete the app's images and its
+    data directory, and there is no error anywhere when that goes wrong.
+    """
+    user, password = credentials(args)
+    installed, status, token = core.installed_compose(args.host, args.name, user, password)
+    print(f"Installed: {args.name} — status {status}", file=sys.stderr)
+
+    text, origin, _ = _update_source(args, installed)
+    problems, warnings = core.validate(text)
+    report(problems, warnings)
+    if problems:
+        die("the new compose is not ZimaOS-compliant — nothing was sent.")
+
+    desired = core.yaml.safe_load(text)
+    if desired.get("name") != args.name:
+        die(f"The new compose calls itself '{desired.get('name')}', the app is '{args.name}'. "
+            f"An update never renames — that would install a second app.")
+
+    changes = core.compose_diff(installed, desired)
+    print(f"\nSource: {origin}")
+    if not changes:
+        print(f"No differences — '{args.name}' already matches its source.")
+        print(f"({core.SERVICE_X_CASAOS_NOTE}.)")
+        return
+    print(f"{len(changes)} difference(s) between the installation and the new definition:")
+    for c in changes:
+        mark = {"add": "+", "remove": "-", "change": "~"}[c["kind"]]
+        old = "(not set)" if c["installed"] is None else repr(c["installed"])
+        new = "(removed)" if c["desired"] is None else repr(c["desired"])
+        print(f"  {mark} {c['path']}\n      {old}  ->  {new}")
+    print(f"\nNot compared: {core.SERVICE_X_CASAOS_NOTE}.")
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        print(f"written: {args.out}", file=sys.stderr)
+    if not args.apply:
+        print("\nNothing was sent (dry run). Add --apply to apply it.")
+        sys.exit(2)          # 2 = there are differences, for scripted drift checks
+
+    status_code, raw, token = core.apply_update(args.host, args.name, text, token=token)
+    print(f"\nHTTP {status_code}: {raw[:200]}")
+    if status_code != 200:
+        die("ZimaOS refused the change.")
+
+    # HTTP 200 is 'accepted'. A change ZimaOS cannot carry out gets the same
+    # answer and even appears in the stored compose, while the old container
+    # keeps running and the status keeps saying 'running' (measured 2026-07-21).
+    # So wait for the containers, not for the document.
+    print("Waiting until the app really runs it (200 means accepted, not done)…")
+    result = core.wait_for_update(
+        args.host, args.name, desired, token=token, timeout=args.wait_timeout,
+        on_progress=lambda w, s, n, probs: print(
+            f"  t+{w:>4}s  status {s}, {n} difference(s) in the stored compose"
+            + (f", {len(probs)} service(s) not running it yet" if probs else ", containers match")),
+    )
+    if not result["applied"]:
+        if result["remaining"]:
+            print(f"\nStored compose still differs after {result['waited']}s:", file=sys.stderr)
+            for c in result["remaining"]:
+                print(f"  ~ {c['path']}: {c['installed']!r} != {c['desired']!r}", file=sys.stderr)
+        for problem in result["running_problems"]:
+            print(f"  RUNNING: {problem}", file=sys.stderr)
+        die("The app does not run the new definition. Nothing was destroyed — the old "
+            "container is still up, which is exactly why neither the app status nor the "
+            "stored compose shows a problem. The usual cause is an image that cannot be "
+            "pulled: check the tag, and for a locally built image that it still exists on "
+            "the host (uninstall deletes images). Logs: "
+            f"GET /v2/app_management/compose/{args.name}/logs")
+
+    print(f"Applied after {result['waited']}s — stored compose matches and every service "
+          f"runs the image it should.")
+    steps = core.post_install_check(
+        args.host, args.name, user, password, ssh_user=args.ssh_user, compose_text=text,
+        expectations=None, timeout=args.wait_timeout,
+        on_progress=lambda w, s: print(f"  t+{w:>4}s  {s}"),
+    )
+    failed = 0
+    for s in steps:
+        print(f"  [{'ok  ' if s['ok'] else 'FAIL'}] {s['step']} — {s['detail']}")
+        if s["hint"]:
+            print(f"         → {s['hint']}")
+        failed += 0 if s["ok"] else 1
+    if failed:
+        die(f"{failed} check(s) failed after the update.")
+    print("The app is up and reachable.")
+
+
 def cmd_blueprints(args):
     """Show what is in the catalogue — including how stale the proof is."""
     entries = core.list_blueprints()
@@ -421,6 +600,34 @@ def main():
                     help="how long to wait for the app to report 'running' (seconds, default 300)")
     sub.add_parser("uninstall", help="remove an app including its data directory").add_argument("name")
 
+    sp = sub.add_parser("update", help="change an installed app in place (read back, diff, apply)")
+    sp.add_argument("name", help="the installed app")
+    sp.add_argument("--source", help="URL of the compose/Dockerfile to re-convert from")
+    sp.add_argument("--blueprint", help="use a blueprint's pinned source instead")
+    sp.add_argument("--file", help="a finished compose file instead of a re-conversion")
+    sp.add_argument("--apply", action="store_true",
+                    help="really apply it — without this the command only shows the diff "
+                         "and exits with code 2 if there is one")
+    sp.add_argument("--var", action="append", metavar="NAME=VALUE",
+                    help="override a value that would otherwise be kept from the installation")
+    sp.add_argument("--keep", action="append", metavar="NAME",
+                    help="keep the installed value of this environment key, whatever the new "
+                         "definition says (generated secrets are kept anyway)")
+    sp.add_argument("--title")
+    sp.add_argument("--author")
+    sp.add_argument("--category")
+    sp.add_argument("--tagline")
+    sp.add_argument("--description")
+    sp.add_argument("--icon")
+    sp.add_argument("--memory")
+    sp.add_argument("--cpus")
+    sp.add_argument("--main")
+    sp.add_argument("--no-icon-check", action="store_true",
+                    help="do not check the icon URL for reachability")
+    sp.add_argument("--wait-timeout", type=int, default=180,
+                    help="how long to wait for the change to actually arrive (seconds, default 180)")
+    sp.add_argument("-o", "--out", help="also write the new compose to a file")
+
     sub.add_parser("blueprints", help="list the tested blueprints")
 
     sp = sub.add_parser("verify", help="run a blueprint's expectations against the live install")
@@ -439,7 +646,7 @@ def main():
     args.port_source_list = ("api", "ssh") if source == "auto" else (source,)
     handler = {"convert": cmd_convert, "inspect": cmd_inspect, "generate": cmd_generate,
                "validate": cmd_validate, "install": cmd_install, "uninstall": cmd_uninstall,
-               "blueprints": cmd_blueprints, "verify": cmd_verify,
+               "update": cmd_update, "blueprints": cmd_blueprints, "verify": cmd_verify,
                "serve": cmd_serve}[args.cmd]
     try:
         handler(args)

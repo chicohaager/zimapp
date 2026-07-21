@@ -1308,5 +1308,245 @@ class Dockerfile(unittest.TestCase):
             core.detect_kind("something: without services\n")
 
 
+
+class UpdateComparison(unittest.TestCase):
+    """What ZimaOS stores is not what we sent — the diff has to know that.
+
+    Every transformation below was read off the live system on 2026-07-21 by
+    installing a known file and fetching it back. Without them, `update` would
+    report changes on an app nobody touched, and the real ones would drown.
+    """
+
+    SENT = yaml.safe_load(textwrap.dedent("""
+        name: demo
+        services:
+          app:
+            image: demo/app:1.0
+            environment:
+            - TZ=Europe/Berlin
+            - KEY=value
+            deploy:
+              resources:
+                limits:
+                  memory: 1GB
+                  cpus: '1.00'
+            ports:
+            - mode: ingress
+              target: 8080
+              published: '8080'
+              protocol: tcp
+            networks:
+            - demo-network
+            depends_on:
+            - db
+            x-casaos:
+              ports:
+              - container: '8080'
+                description:
+                  en_us: WebUI
+          db:
+            image: postgres:18
+        networks:
+          demo-network:
+            driver: bridge
+        x-casaos:
+          main: app
+          title:
+            en_us: Demo
+    """))
+
+    STORED = yaml.safe_load(textwrap.dedent("""
+        name: demo
+        services:
+          app:
+            command: null
+            entrypoint: null
+            image: demo/app:1.0
+            environment:
+              TZ: Europe/Berlin
+              KEY: value
+            deploy:
+              placement: {}
+              resources:
+                limits:
+                  memory: '1073741824'
+                  cpus: '1.00'
+            ports:
+            - mode: ingress
+              target: 8080
+              published: '8080'
+              protocol: tcp
+            networks:
+              demo-network: null
+            depends_on:
+              db:
+                condition: service_started
+                required: true
+          db:
+            command: null
+            entrypoint: null
+            image: postgres:18
+        networks:
+          default:
+            name: demo_default
+          demo-network:
+            name: demo_demo-network
+            driver: bridge
+            external: false
+            ipam: {}
+        x-casaos:
+          main: app
+          store_app_id: demo
+          title:
+            en_us: Demo
+    """))
+
+    def test_storage_format_alone_is_not_a_change(self):
+        self.assertEqual(core.compose_diff(self.STORED, self.SENT), [])
+
+    def test_a_real_change_survives_the_normalisation(self):
+        desired = yaml.safe_load(yaml.safe_dump(self.SENT))
+        desired["services"]["app"]["image"] = "demo/app:2.0"
+        changes = core.compose_diff(self.STORED, desired)
+        self.assertEqual([c["path"] for c in changes], ["services.app.image"])
+        self.assertEqual(changes[0]["installed"], "demo/app:1.0")
+        self.assertEqual(changes[0]["desired"], "demo/app:2.0")
+
+    def test_a_stricter_depends_on_condition_is_a_change(self):
+        desired = yaml.safe_load(yaml.safe_dump(self.SENT))
+        desired["services"]["app"]["depends_on"] = {"db": {"condition": "service_healthy"}}
+        changes = core.compose_diff(self.STORED, desired)
+        self.assertEqual([c["path"] for c in changes], ["services.app.depends_on.db"])
+
+    def test_added_and_removed_are_named_as_such(self):
+        desired = yaml.safe_load(yaml.safe_dump(self.SENT))
+        desired["services"]["app"]["environment"].append("NEW=1")
+        desired["services"]["app"]["environment"].remove("KEY=value")
+        kinds = {c["path"]: c["kind"] for c in core.compose_diff(self.STORED, desired)}
+        self.assertEqual(kinds, {"services.app.environment.NEW": "add",
+                                 "services.app.environment.KEY": "remove"})
+
+    def test_image_reference_is_compared_by_meaning(self):
+        self.assertEqual(core._image_key("redis"), "redis:latest")
+        self.assertEqual(core._image_key("docker.io/library/redis:8"), "redis:8")
+        self.assertEqual(core._image_key("ghcr.io/a/b"), "ghcr.io/a/b:latest")
+        self.assertEqual(core._image_key("a/b@sha256:abc"), "a/b@sha256:abc")
+
+
+class UpdateKeepsWhatRuns(unittest.TestCase):
+    """A regenerated password is not a new password, it is a broken app."""
+
+    INSTALLED = {"services": {"db": {"environment": {"POSTGRES_PASSWORD": "old-secret",
+                                                     "POSTGRES_USER": "paperless"}}}}
+
+    def _doc(self):
+        return {"services": {"db": {"environment": ["POSTGRES_PASSWORD=fresh-secret",
+                                                    "POSTGRES_USER=admin"]}}}
+
+    def test_generated_values_do_not_overwrite_running_ones(self):
+        doc = self._doc()
+        kept = core.keep_installed_values(doc, self.INSTALLED, {"POSTGRES_PASSWORD": "fresh-secret"})
+        self.assertEqual(kept, ["POSTGRES_PASSWORD"])
+        self.assertIn("POSTGRES_PASSWORD=old-secret", doc["services"]["db"]["environment"])
+
+    def test_an_explicit_value_stays_a_visible_change(self):
+        doc = self._doc()
+        core.keep_installed_values(doc, self.INSTALLED, {"POSTGRES_PASSWORD": "fresh-secret"})
+        # POSTGRES_USER was not generated — it is a deliberate change and stays.
+        self.assertIn("POSTGRES_USER=admin", doc["services"]["db"]["environment"])
+
+    def test_force_keeps_a_value_that_was_not_generated(self):
+        doc = self._doc()
+        kept = core.keep_installed_values(doc, self.INSTALLED, {}, force=["POSTGRES_USER"])
+        self.assertEqual(kept, ["POSTGRES_USER"])
+        self.assertIn("POSTGRES_USER=paperless", doc["services"]["db"]["environment"])
+
+    def test_a_renamed_service_keeps_nothing_and_says_so_by_omission(self):
+        doc = {"services": {"database": {"environment": ["POSTGRES_PASSWORD=fresh-secret"]}}}
+        kept = core.keep_installed_values(doc, self.INSTALLED, {"POSTGRES_PASSWORD": "fresh-secret"})
+        self.assertEqual(kept, [])
+        self.assertIn("POSTGRES_PASSWORD=fresh-secret", doc["services"]["database"]["environment"])
+
+    def test_metadata_comes_back_out_of_the_installation(self):
+        installed = {"name": "demo", "services": {"app": {"deploy": {"resources": {"limits": {
+            "memory": "1073741824", "cpus": "1.00"}}}}},
+            "x-casaos": {"main": "app", "author": "someone", "category": "Documents",
+                         "icon": "http://i/x.png", "title": {"en_us": "Demo", "custom": "Demo!"},
+                         "tagline": {"en_us": "short"}}}
+        meta = core.meta_from_installed(installed)
+        self.assertEqual(meta["title"], "Demo!")
+        self.assertEqual(meta["category"], "Documents")
+        self.assertEqual(meta["memory"], "1073741824")
+        self.assertEqual(meta["main"], "app")
+
+    def test_values_for_source_variables_are_carried_over(self):
+        installed = {"services": {"app": {"environment": {"UPLOAD_LOCATION": "/DATA/x",
+                                                          "OTHER": "y"}}}}
+        self.assertEqual(core.carry_over_values(installed, {"UPLOAD_LOCATION", "MISSING"}),
+                         {"UPLOAD_LOCATION": "/DATA/x"})
+
+
+class UpdateCompletionSignal(unittest.TestCase):
+    """The stored compose is not a witness for what an app runs.
+
+    Measured 2026-07-21 on the live system: a PUT with an image that cannot be
+    pulled answers HTTP 200, appears in the stored compose (in one run for ~7s,
+    in the next for over 21s), and the app keeps reporting 'running' the whole
+    time — because the OLD container never stopped. Only GET .../containers
+    tells the truth. These tests keep that lesson from being optimised away.
+    """
+
+    DESIRED = {"services": {"app": {"image": "demo/app:2.0"}}}
+
+    def setUp(self):
+        self._login, self._sleep = core.login, core.time.sleep
+        self._installed, self._containers = core.installed_compose, core.running_containers
+        core.login = lambda h, u, p: "token"
+        core.time.sleep = lambda s: None
+
+    def tearDown(self):
+        core.login, core.time.sleep = self._login, self._sleep
+        core.installed_compose, core.running_containers = self._installed, self._containers
+
+    def test_a_stored_compose_alone_does_not_count_as_applied(self):
+        core.installed_compose = lambda *a, **kw: (self.DESIRED, "running(1)", "token")
+        core.running_containers = lambda *a, **kw: (
+            {"app": {"image": "demo/app:1.0", "state": "running", "status": "Up 2 hours",
+                     "exit_code": 0, "health": "", "id": "abc"}}, "token")
+        result = core.wait_for_update("h", "demo", self.DESIRED, token="token",
+                                      timeout=6, interval=3)
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["remaining"], [])
+        self.assertIn("runs demo/app:1.0", result["running_problems"][0])
+
+    def test_applied_needs_the_container_to_run_it(self):
+        core.installed_compose = lambda *a, **kw: (self.DESIRED, "running(1)", "token")
+        core.running_containers = lambda *a, **kw: (
+            {"app": {"image": "demo/app:2.0", "state": "running", "status": "Up 3 seconds",
+                     "exit_code": 0, "health": "", "id": "def"}}, "token")
+        result = core.wait_for_update("h", "demo", self.DESIRED, token="token",
+                                      timeout=6, interval=3)
+        self.assertTrue(result["applied"])
+
+    def test_a_container_that_exited_is_not_applied(self):
+        core.installed_compose = lambda *a, **kw: (self.DESIRED, "running(1)", "token")
+        core.running_containers = lambda *a, **kw: (
+            {"app": {"image": "demo/app:2.0", "state": "exited", "status": "Exited (127)",
+                     "exit_code": 127, "health": "", "id": "def"}}, "token")
+        result = core.wait_for_update("h", "demo", self.DESIRED, token="token",
+                                      timeout=6, interval=3)
+        self.assertFalse(result["applied"])
+        self.assertIn("exited", result["running_problems"][0])
+
+    def test_a_missing_container_is_named(self):
+        core.installed_compose = lambda *a, **kw: (self.DESIRED, "running(1)", "token")
+        core.running_containers = lambda *a, **kw: ({}, "token")
+        result = core.wait_for_update("h", "demo", self.DESIRED, token="token",
+                                      timeout=3, interval=3)
+        self.assertFalse(result["applied"])
+        self.assertIn("no container at all", result["running_problems"][0])
+
+
+
 if __name__ == "__main__":
     unittest.main()
