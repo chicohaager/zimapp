@@ -443,6 +443,32 @@ Additionally validated: `x-casaos.main` points to an existing service,
 ZimaOS-reserved host ports, no `build:`, no `env_file:`, no
 relative binds, no unresolved `${VAR}`, no `depends_on` pointing at nothing.
 
+### Three traps that leave the app *running* and unusable
+
+ZimaOS sees none of these: the container is up, the port answers, the tile is
+there. They only show when someone tries to log in.
+
+- **The app is told an address it is not reachable on.** A variable like
+  `PAPERLESS_URL` / `APP_URL` naming port 8000 while the service publishes 8123
+  → an app with an origin check (Django, Rails and friends) serves the page and
+  rejects the login POST (§4.4.2). Correct as it stands only behind a reverse
+  proxy — the warning says so.
+- **A secret that is a well-known placeholder** (`change_me`, `secret`,
+  `password`…) is an error: everyone who read the upstream compose knows it.
+  An **empty** secret is only a warning, because whether it is fatal cannot be
+  read off the file — measured on a live pterodactyl, where `MAIL_PASSWORD` is
+  empty on purpose and everything works. Crying wolf here would teach people to
+  ignore the whole class.
+- **Half an admin account.** `*_ADMIN_USER` without `*_ADMIN_PASSWORD` (or the
+  other way round): apps that create their superuser on first start create none,
+  the app runs, and nobody gets in.
+
+Each of these reads its evidence out of the compose file and quotes the value it
+read. None of them guesses a framework from the image name — "looks like Django"
+is not a measurement, and a warning built on it is noise on everything it gets
+wrong. Measured against the six apps running here: zero false alarms, one honest
+warning (that empty `MAIL_PASSWORD`).
+
 ## Known ZimaOS bug (v1.7.0-beta1)
 
 The built-in "Benutzerdefinierte App installieren" UI (that is the label a German
