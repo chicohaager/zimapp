@@ -8,10 +8,22 @@ one ZimaOS app.**
 
 There is a **web UI** (color scheme from the ZFW dashboard) and a CLI.
 
+![The web UI after analyzing the paperless-ngx compose: the source it followed,
+the three detected services with the WebUI service marked `main`, and the app
+metadata that becomes the `x-casaos` block](docs/screenshot-convert.jpg)
+
+The generated compose is editable and re-validated before it is installed —
+and it can be saved as a blueprint, downloaded or handed straight to ZimaOS:
+
+![The result step: the generated ZimaOS compose, the notes that came out of the
+conversion, and the install form](docs/screenshot-result.jpg)
+
 Verified on **ZimaOS v1.7.0-beta1** (host 192.168.1.100), as of 19.07.2026:
 paperless-ngx (webserver + postgres + redis) generated from the upstream URL,
 installed, container `healthy`, tile in the grid, login as superuser proven.
-zimapp itself runs there as an app on port 8790.
+zimapp itself runs there as an app on port 8790. On 21.07.2026 the released
+image was installed from `zimapp-zimaos.yml` on the same host — see the header
+of that file for what exactly was measured.
 
 > **A note on the `§` references.** They point into a private ZimaOS knowledge
 > base that is not part of this repository — measurements of undocumented ZimaOS
@@ -59,10 +71,44 @@ Until then, publish the port on `127.0.0.1` and reach it over SSH or Tailscale,
 or put an authenticating reverse proxy in front. Installing and uninstalling
 always needs your own ZimaOS credentials, which zimapp never stores.
 
-## Operating on ZimaOS
+## Install on ZimaOS
 
-zimapp installs itself as a ZimaOS app — tile in the grid, autostart after
-reboot, no registry account needed:
+**[`zimapp-zimaos.yml`](zimapp-zimaos.yml) is ready to install** — image from
+Docker Hub (amd64 + arm64), nothing to build:
+
+```bash
+git clone https://github.com/chicohaager/zimapp && cd zimapp
+pip install pyyaml
+ZIMA_HOST=<your-zimaos> ZIMA_USER=<you> ZIMA_PASS='…' \
+    python3 zimapp.py install zimapp-zimaos.yml
+```
+
+Tile "zimapp" in the grid, WebUI on port 8790. It is an ordinary compose file,
+so `docker compose -f zimapp-zimaos.yml up -d` works on any other machine too —
+the `x-casaos` block is simply ignored there.
+
+The image is `chicohaager/zimapp:2.0.0` (`:latest` follows it). For a look
+without ZimaOS, and without publishing anything to the network:
+
+```bash
+docker run --rm -p 127.0.0.1:8790:8790 chicohaager/zimapp:latest
+```
+
+The bind mount in it is where **Save as blueprint** writes; ZimaOS creates the
+directory on first install (measured 2026-07-21: `root:root`, mode 777, so the
+container's own user can write in it). Without that mount, saving is switched
+off and says so.
+
+> **Note on the ZimaOS UI.** App Store → *Install custom app* has a `YAML` tab,
+> but that is a **preview of the form** with a copy button, not a paste field —
+> a finished compose cannot be typed into it. (Its own output writes
+> `memory: 14,92GB` with a comma, which is exactly what Rule 6 below forbids.)
+> The `Import` button next to it was not tested.
+
+### Building the image yourself
+
+Not needed for the released image — this is the path for a modified zimapp, and
+it needs no registry account:
 
 ```bash
 # 1. Put the build context on the host and build it there
@@ -101,9 +147,11 @@ For apps that hold data, `uninstall` also removes `/DATA/AppData/<app>/`
 (`delete_config_folder=true`) — so this loop is only harmless for stateless apps
 like zimapp itself.
 
-**What does not work inside the container:** `inspect` and `generate` (the
-single-image path) need SSH to the host — the image ships no SSH client at all.
-Converting, validating, the port check and installing work fully.
+### What does not work inside the container
+
+`inspect` and `generate` (the single-image path) need SSH to the host — the
+image ships no SSH client at all. Converting, validating, the port check and
+installing work fully. This applies to both ways of installing above.
 
 ## CLI
 

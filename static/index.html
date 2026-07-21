@@ -98,13 +98,13 @@
     <!-- 4 — Variables -->
     <section class="card" id="card-vars" hidden>
       <h2>4 &middot; Variables from the source</h2>
-      <p class="panel-hint">
+      <p class="panel-hint" id="vars-hint">
         ZimaOS ships <b>no <code>.env</code></b> with it &mdash; every unresolved <code>${VAR}</code> is a
         startup failure, not a cosmetic flaw. Empty secret fields are filled with a
         random value on request and shown below in plain text.
       </p>
       <div class="grid2" id="var-list"></div>
-      <label class="check"><input type="checkbox" id="opt-secrets" checked> Generate missing passwords/tokens automatically</label>
+      <label class="check" id="vars-secrets"><input type="checkbox" id="opt-secrets" checked> Generate missing passwords/tokens automatically</label>
     </section>
 
     <!-- 5 — Target & generate -->
@@ -173,6 +173,6 @@
     <code>~/dev/ZIMAOS-KNOWLEDGE.md</code> §3.4, §4.4.1, §5. Color scheme taken from the ZFW dashboard.
   </footer>
 </div>
-<script src="./app.js?v=1"></script>
+<script src="./app.js?v=2"></script>
 </body>
 </html>
