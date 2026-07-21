@@ -1,0 +1,89 @@
+# Weekly check whether upstream moved under the blueprints.
+#
+# What this can see: the upstream sources and whether they still convert into a
+# valid ZimaOS compose. What it CANNOT see: any installation — there is no
+# ZimaOS host in a GitHub runner. A green run therefore means "the recipe still
+# holds together", not "the app works". The issue text says so too, because a
+# green badge that is read as more than it is, is worse than no badge.
+name: blueprint drift
+
+on:
+  schedule:
+    # Mondays 06:17 UTC. Not on the hour: GitHub queues those runs longest.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      - "blueprints/**"
+      - "zimapp_core.py"
+      - ".github/workflows/blueprint-drift.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the one dependency
+        run: pip install pyyaml==6.0.2
+
+      - name: Tests
+        # Network-free and host-free. If they fail, a drift report would be
+        # meaningless anyway — it would be reporting zimapp's own breakage as
+        # upstream drift.
+        run: python3 -m unittest -q test_zimapp
+
+      - name: Check the blueprints
+        id: drift
+        run: |
+          set +e
+          python3 zimapp.py drift | tee drift.txt
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Open or update an issue when something moved
+        if: steps.drift.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODE: ${{ steps.drift.outputs.code }}
+        run: |
+          set -euo pipefail
+          title="Blueprint drift: upstream moved or a recipe broke"
+          {
+            if [ "$CODE" = "1" ]; then
+              echo "**A blueprint no longer converts into a valid compose.**"
+            else
+              echo "**Upstream has changed under a blueprint, or one has never been fingerprinted.**"
+            fi
+            echo
+            echo "This says nothing about any installation — a GitHub runner has no ZimaOS host."
+            echo "To check the live side: \`zimapp.py update <app> --blueprint <name>\` (exit 2 on"
+            echo "drift) and \`zimapp.py verify <name>\`."
+            echo
+            echo '```'
+            cat drift.txt
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "After re-verifying, put the new \`source_sha256\` and \`source_seen\` into the"
+            echo "blueprint's \`verified:\` block — that is what this check compares against."
+          } > body.md
+
+          existing=$(gh issue list --state open --label drift --json number \
+                       --jq '.[0].number // empty' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+            echo "Commented on the open issue #$existing instead of opening a second one."
+          else
+            gh label create drift --color B60205 --description "Upstream moved under a blueprint" 2>/dev/null || true
+            gh issue create --title "$title" --label drift --body-file body.md
+          fi

@@ -322,6 +322,31 @@ block** — that field is for what was actually observed, so it stays absent unt
 values that look like secrets are named after saving; `${generate:24}` instead of
 a literal password stores nothing sensitive at all.
 
+### Drift: has upstream moved?
+
+A blueprint pins what upstream looked like when someone proved it — as a
+**fingerprint**, not as a copy:
+
+```bash
+python3 zimapp.py drift                 # all blueprints
+python3 zimapp.py drift paperless-ngx
+```
+
+It fetches every source, compares its sha256 against `verified.source_sha256`,
+re-converts and validates the result. Exit code **0** unchanged, **2** moved or
+never fingerprinted, **1** a recipe that no longer converts.
+
+Why a hash and not the generated compose: a stored copy is exactly what makes a
+catalogue rot. A fingerprint holds no content — it answers one question, "is this
+still the file someone looked at", and that is the question a "tested" badge
+cannot answer for itself.
+
+🔴 **This needs the network, not a ZimaOS host — and therefore says nothing
+about any installation.** `.github/workflows/blueprint-drift.yml` runs it weekly
+and opens (or comments on) an issue, with that limitation written into the issue
+text. The live half is `zimapp.py update <app> --blueprint <name>` (exit 2 on
+drift) and `zimapp.py verify <name>`.
+
 ### The expect block
 
 ```yaml

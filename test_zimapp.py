@@ -1724,5 +1724,105 @@ class FrameworkTraps(unittest.TestCase):
         self.assertTrue(any("well-known placeholder" in p for p in problems), problems)
 
 
+
+class BlueprintDrift(unittest.TestCase):
+    """Has upstream moved under a blueprint — without needing a ZimaOS host.
+
+    The fingerprint is deliberately a hash and not a stored compose: a copy is
+    what makes a catalogue rot. A hash answers only "is this still the file
+    someone looked at", which is exactly what a "tested" badge cannot answer
+    for itself.
+    """
+
+    VALID_COMPOSE = textwrap.dedent("""
+        name: demo
+        services:
+          app:
+            image: x:1
+            ports:
+            - mode: ingress
+              target: 8000
+              published: '8123'
+              protocol: tcp
+        x-casaos:
+          main: app
+          port_map: '8123'
+          icon: http://i/x.png
+          title:
+            en_us: Demo
+          description:
+            en_us: Demo
+    """)
+
+    def test_line_endings_do_not_change_the_fingerprint(self):
+        self.assertEqual(core.source_fingerprint("a\nb\n"), core.source_fingerprint("a\r\nb\r\n"))
+
+    def test_content_does(self):
+        self.assertNotEqual(core.source_fingerprint("a\n"), core.source_fingerprint("b\n"))
+
+    def _blueprint(self, tmp, recorded, source):
+        path = os.path.join(tmp, "demo.yml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent(f"""
+                name: demo
+                title: Demo
+                source: {source}
+                verified:
+                  date: '2026-07-01'
+                  source_seen: '2026-07-01'
+                  source_sha256: {recorded}
+            """))
+        return path
+
+    def _run(self, tmp, recorded, upstream="services:\n  app:\n    image: x:1\n    ports:\n      - '8123:8000'\n"):
+        """Drift check with the network and the conversion stubbed out."""
+        original_dir, original_fetch, original_build = (
+            core.BLUEPRINT_DIR, core.fetch_source, core.build_from_source)
+        core.BLUEPRINT_DIR = tmp
+        core.fetch_source = lambda url, timeout=30: (upstream, url)
+        core.build_from_source = lambda *a, **kw: (self.VALID_COMPOSE,
+                                                   {"web_port": "8123", "app_id": "demo"})
+        try:
+            return core.check_blueprint_drift("demo")
+        finally:
+            core.BLUEPRINT_DIR, core.fetch_source, core.build_from_source = (
+                original_dir, original_fetch, original_build)
+
+    def test_an_unchanged_source_is_ok(self):
+        upstream = "services: {}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._blueprint(tmp, core.source_fingerprint(upstream), "http://u/x.yml")
+            result = self._run(tmp, None, upstream)
+        self.assertEqual(result["status"], "ok")
+
+    def test_a_changed_source_is_reported_with_the_date_it_was_last_seen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._blueprint(tmp, "a" * 64, "http://u/x.yml")
+            result = self._run(tmp, None)
+        self.assertEqual(result["status"], "moved")
+        self.assertIn("2026-07-01", result["notes"][0])
+
+    def test_a_hash_yaml_turned_into_a_number_is_named_as_such(self):
+        """0000... is an int to YAML, and a falsy one. Without the str() this
+        read as 'no fingerprint recorded' — the check would have gone quiet."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._blueprint(tmp, "0" * 64, "http://u/x.yml")
+            result = self._run(tmp, None)
+        self.assertEqual(result["status"], "moved")
+        self.assertTrue(any("not a sha256" in n for n in result["notes"]), result["notes"])
+
+    def test_a_blueprint_without_a_fingerprint_is_not_called_fine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._blueprint(tmp, "x" * 64, "http://u/x.yml")
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text.replace(f"  source_sha256: {'x' * 64}\n", ""))
+            result = self._run(tmp, None)
+        self.assertEqual(result["status"], "unrecorded")
+        self.assertIn("nothing to compare against", result["notes"][0])
+
+
+
 if __name__ == "__main__":
     unittest.main()

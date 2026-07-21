@@ -502,6 +502,50 @@ def cmd_blueprints(args):
             print(f"{'':<18} {bp['tagline']}")
 
 
+def cmd_drift(args):
+    """Has upstream moved under the blueprints, and do they still convert?
+
+    Needs the network, not a ZimaOS host — that is what makes it runnable in a
+    CI. It therefore says nothing about any installation, and the output says so
+    instead of letting "all fine" be read as more than it is.
+    """
+    names = args.names or [bp["name"] for bp in core.list_blueprints()]
+    if not names:
+        print("No blueprints to check.")
+        return
+    results = []
+    for name in names:
+        try:
+            results.append(core.check_blueprint_drift(name))
+        except core.ConvertError as e:
+            results.append({"name": name, "status": "broken", "notes": [],
+                            "problems": [str(e)], "source": None, "pinned": False,
+                            "fingerprint": None, "recorded": None})
+
+    mark = {"ok": "ok     ", "moved": "MOVED  ", "broken": "BROKEN ", "unrecorded": "no proof"}
+    for r in results:
+        print(f"[{mark[r['status']]}] {r['name']}"
+              + (f"  ({r['source']}{', pinned' if r['pinned'] else ''})" if r["source"] else ""))
+        for note in r["notes"]:
+            print(f"    - {note}")
+        for problem in r["problems"]:
+            print(f"    ERROR: {problem}")
+        if r["fingerprint"]:
+            print(f"    source_sha256: {r['fingerprint']}")
+
+    broken = [r for r in results if r["status"] == "broken"]
+    moved = [r for r in results if r["status"] in ("moved", "unrecorded")]
+    print(f"\n{len(results)} blueprint(s): {len(results) - len(broken) - len(moved)} unchanged, "
+          f"{len(moved)} moved or unproven, {len(broken)} broken.")
+    print("This checked upstream and the conversion. It did NOT look at any installation — "
+          "for that: `zimapp.py update <app> --blueprint <name>` (exit 2 on drift) and "
+          "`zimapp.py verify <name>`.")
+    if broken:
+        sys.exit(1)
+    if moved:
+        sys.exit(2)
+
+
 def cmd_verify(args):
     """Run a blueprint's expectations against the running installation.
 
@@ -653,6 +697,9 @@ def main():
 
     sub.add_parser("blueprints", help="list the tested blueprints")
 
+    sp = sub.add_parser("drift", help="has upstream moved under the blueprints? (no ZimaOS host needed)")
+    sp.add_argument("names", nargs="*", help="blueprints to check (default: all)")
+
     sp = sub.add_parser("verify", help="run a blueprint's expectations against the live install")
     sp.add_argument("name", help="blueprint / app name")
     sp.add_argument("--url", help="base URL of the installation (default: looked up in the app grid)")
@@ -670,6 +717,7 @@ def main():
     handler = {"convert": cmd_convert, "inspect": cmd_inspect, "generate": cmd_generate,
                "validate": cmd_validate, "install": cmd_install, "uninstall": cmd_uninstall,
                "update": cmd_update, "blueprints": cmd_blueprints, "verify": cmd_verify,
+               "drift": cmd_drift,
                "serve": cmd_serve}[args.cmd]
     try:
         handler(args)

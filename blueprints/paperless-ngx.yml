@@ -57,6 +57,12 @@ expect:
 verified:
   date: 2026-07-19
   host: ZimaOS v1.7.0-beta1 (192.168.1.147)
+  # Fingerprint of the upstream file, taken on the date below — NOT on the proof
+  # date above, because what upstream looked like on 19.07. cannot be recovered.
+  # It answers one question: "has upstream moved since someone last looked?"
+  # `zimapp.py drift` compares against it.
+  source_sha256: f722bfdfd92f868004945193293fbd0e7666a5019ae7d6e0a76ec3e7533b3eac
+  source_seen: 2026-07-21
   result: >-
     Converted, installed, all three containers up, webserver healthy, tile in
     the grid, superuser login proven via POST (302) and /api/ui_settings/
