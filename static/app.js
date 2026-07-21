@@ -114,7 +114,7 @@ async function analyze() {
 
     $("card-stack").hidden = data.kind !== "compose";
     $("card-meta").hidden = false;
-    $("card-vars").hidden = data.variables.length === 0;
+    $("card-vars").hidden = false;
     $("card-target").hidden = false;
     $("fld-image").hidden = data.kind !== "dockerfile";
 
@@ -210,6 +210,19 @@ function renderMeta(data) {
 function renderVars(variables) {
   const list = $("var-list");
   clear(list);
+  // The card stays visible even with nothing to fill in: hiding it left a hole
+  // in the numbering (3 · metadata followed by 5 · target), which reads like a
+  // section that failed to load. "Nothing to fill in" is a result, not a gap.
+  const empty = variables.length === 0;
+  $("vars-hint").hidden = empty;
+  $("vars-secrets").hidden = empty;
+  if (empty) {
+    const note = document.createElement("p");
+    note.className = "panel-hint";
+    note.textContent = "The source uses no ${VAR} placeholders — nothing to fill in here.";
+    list.appendChild(note);
+    return;
+  }
   variables.forEach((v) => {
     const fld = document.createElement("div");
     fld.className = "fld";

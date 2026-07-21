@@ -4,6 +4,7 @@
 # blueprints/ is NOT affected: that is the source these are generated from.
 /*.yml
 !zimapp-src.yml
+!zimapp-zimaos.yml
 
 __pycache__/
 *.pyc
