@@ -362,6 +362,8 @@ def _update_source(args, installed):
     if restored:
         print(f"Kept from the installation instead of regenerating: {', '.join(restored)}",
               file=sys.stderr)
+    for note in core.regenerated_elsewhere(doc, installed, info["generated"], restored):
+        info["warnings"].append(note)
     if info["generated"]:
         print("Newly generated secrets (they exist nowhere else — note them down):", file=sys.stderr)
         for key, value in info["generated"].items():
@@ -379,6 +381,18 @@ def cmd_update(args):
     here: a `uninstall` + `install` round would delete the app's images and its
     data directory, and there is no error anywhere when that goes wrong.
     """
+    # Argument combinations first, before anything touches the network: a
+    # finished file IS the definition, so flags that could only act on a
+    # generated one would be a silent no-op — the user would believe a value was
+    # kept that nothing ever looked at.
+    if args.file:
+        ignored = [flag for flag, value in (("--source", args.source), ("--blueprint", args.blueprint),
+                                            ("--var", args.var), ("--keep", args.keep)) if value]
+        if ignored:
+            die(f"--file is the finished definition; {', '.join(ignored)} would do nothing on "
+                f"that path. Either edit the file, or use --source/--blueprint so the compose "
+                f"is generated and those values have somewhere to apply.")
+
     user, password = credentials(args)
     installed, status, token = core.installed_compose(args.host, args.name, user, password)
     print(f"Installed: {args.name} — status {status}", file=sys.stderr)
@@ -448,9 +462,18 @@ def cmd_update(args):
 
     print(f"Applied after {result['waited']}s — stored compose matches and every service "
           f"runs the image it should.")
+    # Same as install: if the app has a blueprint, its expectations are what
+    # makes "it works" checkable. An update that leaves the app broken should
+    # not end in a success message.
+    expectations = None
+    try:
+        if os.path.isfile(core.blueprint_path(args.name, allow_paths=True)):
+            expectations = core.load_blueprint(args.name, allow_paths=True).get("expect")
+    except core.ConvertError:
+        expectations = None
     steps = core.post_install_check(
         args.host, args.name, user, password, ssh_user=args.ssh_user, compose_text=text,
-        expectations=None, timeout=args.wait_timeout,
+        expectations=expectations, timeout=args.wait_timeout,
         on_progress=lambda w, s: print(f"  t+{w:>4}s  {s}"),
     )
     failed = 0
