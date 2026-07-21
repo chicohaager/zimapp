@@ -1824,5 +1824,116 @@ class BlueprintDrift(unittest.TestCase):
 
 
 
+
+class UpdateFromTheWebUI(unittest.TestCase):
+    """The two endpoints behind the update buttons.
+
+    The app name comes out of the compose, never out of a separate field —
+    otherwise app A's definition could be sent to app B, and an update does not
+    rename, it overwrites.
+    """
+
+    VALID = textwrap.dedent("""
+        name: demo
+        services:
+          app:
+            image: x:2
+            ports:
+            - mode: ingress
+              target: 8000
+              published: '8123'
+              protocol: tcp
+        x-casaos:
+          main: app
+          port_map: '8123'
+          icon: http://i/x.png
+          title:
+            en_us: Demo
+          description:
+            en_us: Demo
+    """)
+
+    def setUp(self):
+        import zimapp_web
+        self.web = zimapp_web
+        self._installed, self._apply, self._wait = (
+            core.installed_compose, core.apply_update, core.wait_for_update)
+        self.sent = []
+        core.installed_compose = lambda host, name, *a, **kw: (
+            {"name": name, "services": {"app": {"image": "x:1"}}}, "running(1)", "token")
+        core.apply_update = lambda host, name, text, **kw: (
+            self.sent.append((name, text)) or (200, "accepted", "token"))
+        core.wait_for_update = lambda *a, **kw: {
+            "applied": True, "remaining": [], "running_problems": [], "status": "running(1)",
+            "waited": 9}
+
+    def tearDown(self):
+        core.installed_compose, core.apply_update, core.wait_for_update = (
+            self._installed, self._apply, self._wait)
+
+    def _payload(self, **extra):
+        return dict({"yaml": self.VALID, "host": "h", "user": "u", "password": "p"}, **extra)
+
+    def test_the_diff_sends_nothing(self):
+        result = self.web.api_update_diff(self._payload())
+        self.assertEqual(result["name"], "demo")
+        self.assertIn("services.app.image", [c["path"] for c in result["changes"]])
+        self.assertEqual(self.sent, [])
+        self.assertIn("x-casaos", result["not_compared"])
+
+    def test_an_invalid_compose_is_never_sent(self):
+        with self.assertRaises(core.ConvertError) as cm:
+            self.web.api_update_diff(self._payload(yaml="name: demo\nservices: {}\n"))
+        self.assertIn("Nothing was sent", str(cm.exception))
+        self.assertEqual(self.sent, [])
+
+    def test_a_compose_without_a_name_is_stopped_by_the_validator(self):
+        """The name check inside the endpoint is a second lock: the validator
+        already refuses a compose without a top-level name, and this test says
+        which of the two actually fires — so nobody removes the wrong one."""
+        with self.assertRaises(core.ConvertError) as cm:
+            self.web.api_update_diff(self._payload(yaml=self.VALID.replace("name: demo\n", "", 1)))
+        self.assertIn("Nothing was sent", str(cm.exception))
+        self.assertIn("Top-level 'name:' is missing", str(cm.exception))
+        self.assertEqual(self.sent, [])
+
+    def test_apply_sends_the_compose_under_its_own_name(self):
+        result = self.web.api_update_apply(self._payload())
+        self.assertTrue(result["applied"])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0], "demo")
+
+    def test_nothing_is_sent_when_there_is_nothing_to_change(self):
+        core.installed_compose = lambda host, name, *a, **kw: (
+            core.yaml.safe_load(self.VALID), "running(1)", "token")
+        result = self.web.api_update_apply(self._payload())
+        self.assertFalse(result["sent"])
+        self.assertEqual(self.sent, [])
+
+    def test_a_refused_change_is_an_error_and_not_a_result(self):
+        core.apply_update = lambda *a, **kw: (400, "nope", "token")
+        with self.assertRaises(core.ConvertError) as cm:
+            self.web.api_update_apply(self._payload())
+        self.assertIn("refused", str(cm.exception))
+
+    def test_an_update_that_did_not_take_is_reported_as_not_applied(self):
+        core.wait_for_update = lambda *a, **kw: {
+            "applied": False, "remaining": [], "waited": 60, "status": "running(1)",
+            "running_problems": ["app: runs x:1, should run x:2"]}
+        result = self.web.api_update_apply(self._payload())
+        self.assertFalse(result["applied"])
+        self.assertIn("should run x:2", result["running_problems"][0])
+
+    def test_the_ui_only_applies_what_it_compared(self):
+        """The Apply button must refuse a compose that changed after the diff —
+        a button acting on a diff nobody saw is a green banner with no check."""
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "static", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("yaml !== state.updateDiffFor", js)
+        self.assertIn("Compare again before applying", js)
+
+
+
 if __name__ == "__main__":
     unittest.main()

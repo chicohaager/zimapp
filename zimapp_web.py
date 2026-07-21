@@ -381,6 +381,64 @@ def api_postcheck(payload):
     return {"steps": steps, "ok": all(s["ok"] for s in steps)}
 
 
+def _update_target(payload):
+    """(host, user, password, name, text, desired) for both update endpoints.
+
+    The app name comes out of the compose itself. Taking it from a separate
+    field would allow sending app A's definition to app B — and an update never
+    renames, it would just overwrite the wrong app.
+    """
+    host, user, password = _credentials(payload)
+    text = payload.get("yaml") or ""
+    problems, _ = core.validate(text)
+    if problems:
+        raise core.ConvertError(
+            "Nothing was sent, the compose is not compliant:\n- " + "\n- ".join(problems))
+    desired = core.yaml.safe_load(text)
+    name = str((desired or {}).get("name") or "").strip()
+    if not name:
+        # A second lock. validate() above already refuses a compose without a
+        # top-level name (Rule 4), so this normally never fires — but a PUT to
+        # an empty app name is not something to leave to another function's
+        # promise.
+        raise core.ConvertError("The compose has no top-level 'name:' — no app to update.")
+    return host, user, password, name, text, desired
+
+
+def api_update_diff(payload):
+    """What would change on the installation. Reads, sends nothing."""
+    host, user, password, name, _, desired = _update_target(payload)
+    installed, status, _ = core.installed_compose(host, name, user, password)
+    return {"name": name, "app_status": status,
+            "changes": core.compose_diff(installed, desired),
+            "not_compared": core.SERVICE_X_CASAOS_NOTE}
+
+
+def api_update_apply(payload):
+    """Send it, then wait until the app REALLY runs it.
+
+    Blocking on purpose, like /api/postcheck: the answer has to be the outcome,
+    not a receipt. HTTP 200 from ZimaOS means 'accepted', and a change it cannot
+    carry out looks exactly the same from there.
+    """
+    host, user, password, name, text, desired = _update_target(payload)
+    installed, _, token = core.installed_compose(host, name, user, password)
+    changes = core.compose_diff(installed, desired)
+    if not changes:
+        return {"name": name, "sent": False, "applied": True, "changes": [],
+                "message": f"'{name}' already matches — nothing was sent."}
+    status, body, token = core.apply_update(host, name, text, token=token)
+    if status != 200:
+        raise core.ConvertError(f"ZimaOS refused the change (HTTP {status}): {body[:300]}")
+    result = core.wait_for_update(host, name, desired, token=token,
+                                  timeout=int(payload.get("timeout") or 180))
+    return {"name": name, "sent": True, "changes": changes, "http": status,
+            "applied": result["applied"], "waited": result["waited"],
+            "remaining": result["remaining"],
+            "running_problems": result["running_problems"],
+            "not_compared": core.SERVICE_X_CASAOS_NOTE}
+
+
 def api_uninstall(payload):
     host, user, password = _credentials(payload)
     name = payload.get("name")
@@ -398,6 +456,8 @@ ROUTES = {
     "/api/blueprint/save": api_blueprint_save,
     "/api/validate": api_validate,
     "/api/install": api_install,
+    "/api/update/diff": api_update_diff,
+    "/api/update/apply": api_update_apply,
     "/api/uninstall": api_uninstall,
 }
 

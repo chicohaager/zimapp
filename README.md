@@ -211,6 +211,12 @@ It starts from what ZimaOS actually has, not from a file lying around here:
 Without `--apply` nothing is sent and the exit code is **2 if there are
 differences**, 0 if there are none — that is the drift check for a cron job.
 
+The **web UI has the same two steps** in section 7: *Compare with installation*
+reads what ZimaOS really has and lists the differences without sending anything,
+and *Apply update* appears only after that. It applies **exactly the text that
+was compared** — edit the compose in between and it refuses, because the list on
+screen then describes a different file.
+
 ```text
 5 difference(s) between the installation and the new definition:
   ~ services.webserver.image
