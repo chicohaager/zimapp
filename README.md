@@ -589,6 +589,15 @@ before planning around it:
   is a different question, and an own store is the path that does not depend on
   someone else's queue.
 
+A worked example of that own store is
+[chicohaager/zima-appstore](https://github.com/chicohaager/zima-appstore) ("Lintuxer
+Apps"), which ships the Invoice Ninja file below. Registering it, serving the app
+through `GET /apps` and unregistering it again without residue are all measured;
+what is **not** solved is the App Store UI, which does not render a third-party
+store as its own group. Three candidate mechanisms are ruled out — the catalog
+carries no store field on an app record, `store_app_id` is just the app's folder
+name, and `category-list.json` is unused even by the store that has one.
+
 Additionally validated: `x-casaos.main` points to an existing service,
 `port_map` really is one of its published ports, no duplicate or
 ZimaOS-reserved host ports, no `build:`, no `env_file:`, no
