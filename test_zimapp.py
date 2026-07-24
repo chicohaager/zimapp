@@ -1998,6 +1998,35 @@ class StoreMetadata(unittest.TestCase):
         doc.update(over)
         return core.dump(doc)
 
+    def test_the_categories_are_the_ones_zimaos_actually_offers(self):
+        """Read from the store's own category-list.json on a v1.7.0-beta1 host.
+
+        The list zimapp shipped before was the CasaOS one — `Games`,
+        `Utilities`, `Entertainment` and friends. Not one of them exists in
+        ZimaOS' catalogue, so the validator waved through every category that
+        lands nowhere and warned about every one that works.
+        """
+        measured = {"AI", "Developer", "Finance", "Home", "Media",
+                    "Networking", "Others", "Productivity", "Social"}
+        self.assertEqual(core.VALID_CATEGORIES, measured)
+        for gone in ("Games", "Utilities", "Entertainment", "Backup", "Cloud"):
+            self.assertNotIn(gone, core.VALID_CATEGORIES)
+
+    def test_a_category_zimaos_does_not_know_is_reported(self):
+        _, notes = core.validate(self._minimal())
+        self.assertTrue(any("Utilities" in n for n in notes),
+                        f"expected a note about the category, got {notes}")
+        _, ok = core.validate(core.dump({
+            "name": "demo",
+            "services": {"app": {"image": "nginx:1.29", "ports": [
+                {"mode": "ingress", "target": 80, "published": "8080", "protocol": "tcp"}]}},
+            "x-casaos": {"main": "app", "port_map": "8080", "icon": "http://x/i.png",
+                         "title": {"en_us": "Demo"}, "description": {"en_us": "Demo"},
+                         "category": "Others", "id": "io.github.you.demo", "version": "1.29"},
+        }))
+        self.assertFalse(any("categor" in n.lower() for n in ok),
+                         f"'Others' is a real ZimaOS category, got {ok}")
+
     def test_store_id_is_derived_from_a_github_source(self):
         self.assertEqual(core.suggest_store_id(
             "https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/main/docker-compose.yml",

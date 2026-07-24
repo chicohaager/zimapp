@@ -33,10 +33,14 @@ except ImportError:  # fail loudly, not silently (no fallback guessing)
 INSTALL_PATH = "/v2/app_management/compose"
 LOGIN_PATH = "/v1/users/login"
 
+# The categories ZimaOS actually offers. Read on 2026-07-24 from the official
+# store's own `category-list.json` on a v1.7.0-beta1 host, and cross-checked
+# against what its 166 apps declare — they use these nine and nothing else.
+# The older CasaOS names (Backup, Cloud, Entertainment, Games, Utilities, …) are
+# gone: an app that carries one lands in a category the store does not know.
 VALID_CATEGORIES = {
-    "Backup", "Cloud", "Developer", "Documents", "Entertainment", "Finance",
-    "Games", "Home Automation", "Media", "Networking", "Photography",
-    "Productivity", "Security", "Social", "Utilities",
+    "AI", "Developer", "Finance", "Home", "Media", "Networking",
+    "Others", "Productivity", "Social",
 }
 
 # Ports that ZimaOS occupies itself — never propose them as a host port.
