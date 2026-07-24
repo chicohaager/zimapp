@@ -257,7 +257,7 @@ x-casaos:
     - amd64
     - arm64
   main: nginx
-  author: Holgi
+  author: Lintuxer
   developer: Invoice Ninja
   category: Finance
   icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/invoice-ninja.png
