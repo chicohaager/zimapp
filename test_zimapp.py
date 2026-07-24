@@ -1977,5 +1977,100 @@ class UpdateFromTheWebUI(unittest.TestCase):
 
 
 
+class StoreMetadata(unittest.TestCase):
+    """x-casaos fields the ZimaOS app store (v2 protocol) requires.
+
+    Measured on 2026-07-24: `id`, `version`, `port_map` (string), `icon`,
+    `title`, `category` and — in practice — `index` are required by
+    docs/specs/compose-and-x-casaos.md. None of them stops an installation,
+    which is exactly why their absence has to be reported.
+    """
+
+    def _minimal(self, **over):
+        doc = {
+            "name": "demo",
+            "services": {"app": {"image": "nginx:1.29", "ports": [
+                {"mode": "ingress", "target": 80, "published": "8080", "protocol": "tcp"}]}},
+            "x-casaos": {"main": "app", "port_map": "8080", "icon": "http://x/i.png",
+                         "title": {"en_us": "Demo"}, "description": {"en_us": "Demo"},
+                         "category": "Utilities", "id": "io.github.you.demo", "version": "1.29"},
+        }
+        doc.update(over)
+        return core.dump(doc)
+
+    def test_store_id_is_derived_from_a_github_source(self):
+        self.assertEqual(core.suggest_store_id(
+            "https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/main/docker-compose.yml",
+            "paperless-ngx"), "io.github.paperlessngx.paperlessngx")
+        self.assertEqual(core.suggest_store_id(
+            "https://cdn.jsdelivr.net/gh/someone/repo@main/compose.yml", "myapp"),
+            "io.github.someone.myapp")
+
+    def test_no_store_id_is_invented_for_other_sources(self):
+        """An invented domain in an identifier is worse than a missing field:
+        a store deduplicates on exactly this value."""
+        for url in ("https://example.com/docker-compose.yml", "", None,
+                    "https://gitlab.com/owner/repo/-/raw/main/compose.yml"):
+            self.assertEqual(core.suggest_store_id(url, "myapp"), "", url)
+
+    def test_version_comes_from_a_concrete_image_tag(self):
+        self.assertEqual(core.image_version("mysql:8"), "8")
+        self.assertEqual(core.image_version("ghcr.io/owner/app:v1.2.3"), "v1.2.3")
+        self.assertEqual(core.image_version("invoiceninja/invoiceninja:5.13.26@sha256:abc"), "5.13.26")
+
+    def test_a_moving_tag_is_not_a_version(self):
+        """'latest' as a version is a filled-looking field with no information."""
+        for image in ("nginx", "nginx:latest", "app:stable", "app@sha256:abc", ""):
+            self.assertEqual(core.image_version(image), "", image)
+
+    def test_convert_writes_id_version_and_scheme(self):
+        doc = {"services": {"web": {"image": "ghcr.io/owner/app:2.1.0", "ports": ["8099:80"]}}}
+        result, info = core.convert(doc, {"name": "demo", "title": "Demo"}, {
+            "source_url": "https://github.com/owner/app/blob/main/docker-compose.yml"})
+        xc = result["x-casaos"]
+        self.assertEqual(xc["id"], "io.github.owner.demo")
+        self.assertEqual(xc["version"], "2.1.0")
+        self.assertEqual(xc["scheme"], "http")
+
+    def test_an_unknown_id_stays_absent_instead_of_guessed(self):
+        doc = {"services": {"web": {"image": "app:latest", "ports": ["8099:80"]}}}
+        result, _ = core.convert(doc, {"name": "demo"}, {"source_url": "https://example.com/c.yml"})
+        self.assertNotIn("id", result["x-casaos"])
+        self.assertNotIn("version", result["x-casaos"])
+
+    def test_explicit_values_win_over_derivation(self):
+        doc = {"services": {"web": {"image": "app:1.0", "ports": ["8099:80"]}}}
+        result, _ = core.convert(doc, {"name": "demo", "store_id": "com.example.thing",
+                                       "version": "9.9"},
+                                 {"source_url": "https://github.com/owner/app"})
+        self.assertEqual(result["x-casaos"]["id"], "com.example.thing")
+        self.assertEqual(result["x-casaos"]["version"], "9.9")
+
+    def test_missing_store_fields_are_a_warning_not_a_blocker(self):
+        """Store-readiness must not block an install — but it must be said."""
+        doc = yaml.safe_load(self._minimal())
+        del doc["x-casaos"]["id"]
+        del doc["x-casaos"]["version"]
+        problems, warnings = core.validate(core.dump(doc))
+        self.assertEqual(problems, [])
+        self.assertTrue(any("x-casaos.id is missing" in w for w in warnings), warnings)
+        self.assertTrue(any("x-casaos.version is missing" in w for w in warnings), warnings)
+
+    def test_a_malformed_store_id_is_a_blocker(self):
+        doc = yaml.safe_load(self._minimal())
+        doc["x-casaos"]["id"] = "demo"
+        problems, _ = core.validate(core.dump(doc))
+        self.assertTrue(any("reverse-domain" in p for p in problems), problems)
+
+    def test_the_cli_ships_no_placeholder_icon(self):
+        """box.png resolves — and is the Box.com logo. A default that passes the
+        reachability check while showing a foreign brand is the worst case:
+        it looks verified. (It shipped on an Immich tile for days.)"""
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "zimapp.py"), encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertNotIn('default="https://icon.casaos.io/main/all/box.png"', source)
+
+
 if __name__ == "__main__":
     unittest.main()

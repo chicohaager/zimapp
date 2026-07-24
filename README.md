@@ -549,6 +549,46 @@ All verified on the live system, not copied from the docs:
    the app status stays `running`, and only the container log knows why nothing
    answers. A `${VAR}` reference is *not* reported here — it has its own message.
 
+### Store readiness (v2 app store protocol)
+
+The ZimaOS app store (`IceWhaleTech/CasaOS-AppStore`, v2) requires three fields a
+plain installation does not care about, so their absence is **warned** about, not
+blocked — an app installs perfectly well without them, and that is exactly why
+nobody notices they are missing until a store rejects the file:
+
+- **`x-casaos.id`** — reverse-domain, at least two segments. Derived as
+  `io.github.<owner>.<app>` **only** when the source is hosted on GitHub;
+  otherwise the field stays empty. An invented domain in an identifier is worse
+  than a missing one, because a store deduplicates on exactly this value.
+  Set your own with `--app-id`.
+- **`x-casaos.version`** — read off the image tag. An image on `:latest` cannot
+  supply one, so the field stays empty rather than claiming "latest" is a
+  version. Set it with `--app-version`.
+- **`x-casaos.scheme`** — always `http` here, because that is all these generated
+  port mappings ever are.
+
+A malformed `id` *is* an error. Measured on 2026-07-24: ZimaOS v1.7.0-beta1 stores
+all three unchanged on install (and adds `store_app_id` itself), so store metadata
+costs nothing even for an app that never leaves the machine.
+
+**Where such a file can go, measured the same day.** ZimaOS reads its app stores
+from a list you can query (`GET /v2/app_management/appstore`) and add to
+(`POST /appstore?url=…`, `DELETE /appstore/{id}`). Two things are worth knowing
+before planning around it:
+
+- v1.7.0-beta1 accepts **ZIP sources only**. Registering a v2 `store.json` URL
+  answers `HTTP 200` and then does nothing — the source never appears in the
+  list, and the service journal says `zip: not a valid zip file`. A store for
+  today's ZimaOS therefore ships as a zip; the simplest form is a GitHub source
+  archive of the store repo (`…/archive/refs/heads/main.zip`), which is exactly
+  what the BigBear store does.
+- The official store (`IceWhaleTech/CasaOS-AppStore`) documents a PR workflow,
+  but on 2026-07-24 it had **30 open pull requests, the oldest 1039 days**, most
+  of them "Add \<app\> to App Store" from outside contributors; the merged ones
+  in that window came from maintainer accounts. Submitting is possible. Landing
+  is a different question, and an own store is the path that does not depend on
+  someone else's queue.
+
 Additionally validated: `x-casaos.main` points to an existing service,
 `port_map` really is one of its published ports, no duplicate or
 ZimaOS-reserved host ports, no `build:`, no `env_file:`, no

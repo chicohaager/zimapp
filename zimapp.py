@@ -87,6 +87,8 @@ def meta_from_args(args, fallback_title=None):
         "cpus": args.cpus,
         "image": getattr(args, "image_ref", None),
         "port": getattr(args, "port", None),
+        "store_id": getattr(args, "store_id", "") or "",
+        "version": getattr(args, "version", "") or "",
     }
 
 
@@ -324,7 +326,7 @@ def _update_source(args, installed):
             if blueprint.get(key):
                 meta[key] = blueprint[key]
     for key in ("title", "author", "category", "tagline", "description", "icon",
-                "memory", "cpus", "main"):
+                "memory", "cpus", "main", "store_id", "version"):
         value = getattr(args, key, None)
         if value:
             meta[key] = value
@@ -613,8 +615,9 @@ def main():
     global PARSER_DEFAULTS
     PARSER_DEFAULTS = {
         "author": "", "category": "Utilities", "tagline": "Self-hosted app",
-        "description": None, "icon": "https://icon.casaos.io/main/all/box.png",
+        "description": None, "icon": "",
         "memory": "2GB", "cpus": "2.00", "name": None, "title": None, "main": None,
+        "store_id": "", "version": "",
     }
 
     def add_meta(sp):
@@ -624,13 +627,23 @@ def main():
         sp.add_argument("--category", default="Utilities")
         sp.add_argument("--tagline", default="Self-hosted app")
         sp.add_argument("--description", default=None)
-        # NOT .../all/default.png — that URL 404s (checked 2026-07-19), which would
-        # hand every generated app an empty tile without ZimaOS saying a word
-        # (Rule 8). box.png is a generic placeholder that actually resolves.
-        sp.add_argument("--icon", default="https://icon.casaos.io/main/all/box.png",
+        # No placeholder default. `.../all/default.png` 404s (checked 2026-07-19),
+        # and `box.png` — the value that used to stand here — is the Box.com logo:
+        # it resolves, so it passes every reachability check, and ships a foreign
+        # brand on the tile (that is how an Immich install wore it for days).
+        # Empty means the icon check reports "no icon" (Rule 8), which is visible.
+        sp.add_argument("--icon", default="",
                         help="icon URL — must be reachable, or the tile stays empty (Rule 8)")
         sp.add_argument("--memory", default="2GB", help="period as the decimal separator (Rule 6)")
         sp.add_argument("--cpus", default="2.00")
+        # Store metadata (v2 protocol). Both stay empty by default: an invented
+        # id or a version of "latest" is a field that looks filled and says
+        # nothing — and the validator could no longer report it as missing.
+        sp.add_argument("--app-id", dest="store_id", default="",
+                        help="reverse-domain app id for an app store, e.g. io.github.you.myapp "
+                             "(derived from a GitHub source URL when omitted)")
+        sp.add_argument("--app-version", dest="version", default="",
+                        help="app version for a store listing (read off the image tag when omitted)")
 
     sp = sub.add_parser("convert", help="turn a compose/Dockerfile URL into a ZimaOS app")
     sp.add_argument("url", nargs="?", help="URL or path to docker-compose.yml / Dockerfile")
@@ -692,6 +705,8 @@ def main():
     sp.add_argument("--tagline")
     sp.add_argument("--description")
     sp.add_argument("--icon")
+    sp.add_argument("--app-id", dest="store_id")
+    sp.add_argument("--app-version", dest="version")
     sp.add_argument("--memory")
     sp.add_argument("--cpus")
     sp.add_argument("--main")
