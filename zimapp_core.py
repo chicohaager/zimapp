@@ -1284,6 +1284,25 @@ def dollar_findings(doc, limit=3):
     return hits
 
 
+def english_text(block):
+    """The English string out of a localized x-casaos block, whatever its case.
+
+    We write `en_us`; the ZimaOS app store writes `en_US` — every single app in
+    the official store does, and a tile built from one renders fine (measured
+    2026-07-24 on v1.7.0-beta1). Insisting on one spelling would reject the
+    store's own files, so both count.
+    """
+    if not isinstance(block, dict):
+        return ""
+    for key in ("en_us", "en_US"):
+        if str(block.get(key) or "").strip():
+            return str(block[key])
+    for key, value in block.items():
+        if str(key).lower() == "en_us" and str(value or "").strip():
+            return str(value)
+    return ""
+
+
 def validate(text):
     """Checks exactly those traps that ZimaOS acknowledges silently or cryptically.
 
@@ -1377,10 +1396,11 @@ def validate(text):
         )
     if casaos.get("category") and casaos["category"] not in VALID_CATEGORIES:
         warnings.append(f"Category '{casaos['category']}' is not a ZimaOS standard category.")
-    if not (casaos.get("title") or {}).get("en_us"):
-        problems.append("x-casaos.title.en_us is missing — mandatory field (§5.1).")
-    if not (casaos.get("description") or {}).get("en_us"):
-        warnings.append("x-casaos.description.en_us is missing — mandatory field according to §5.1.")
+    if not english_text(casaos.get("title")):
+        problems.append("x-casaos.title has no English text (en_us / en_US) — mandatory field (§5.1).")
+    if not english_text(casaos.get("description")):
+        warnings.append("x-casaos.description has no English text (en_us / en_US) — "
+                        "mandatory field according to §5.1.")
 
     all_published = {}
     for name, svc in services.items():
@@ -2286,11 +2306,11 @@ def meta_from_installed(doc):
     limits = ((service.get("deploy") or {}).get("resources") or {}).get("limits") or {}
     meta = {
         "name": doc.get("name") or "",
-        "title": (title.get("custom") or title.get("en_us") or "") if isinstance(title, dict) else str(title),
+        "title": (title.get("custom") or english_text(title)) if isinstance(title, dict) else str(title),
         "author": xc.get("author") or "",
         "category": xc.get("category") or "",
-        "tagline": (xc.get("tagline") or {}).get("en_us", "") if isinstance(xc.get("tagline"), dict) else "",
-        "description": (xc.get("description") or {}).get("en_us", "") if isinstance(xc.get("description"), dict) else "",
+        "tagline": english_text(xc.get("tagline")),
+        "description": english_text(xc.get("description")),
         "icon": xc.get("icon") or "",
         "index": xc.get("index") or "",
         "main": main,

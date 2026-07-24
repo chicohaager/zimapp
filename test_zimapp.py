@@ -2062,6 +2062,25 @@ class StoreMetadata(unittest.TestCase):
         problems, _ = core.validate(core.dump(doc))
         self.assertTrue(any("reverse-domain" in p for p in problems), problems)
 
+    def test_the_store_spelling_of_the_locale_key_is_accepted(self):
+        """We write en_us, the official store writes en_US — in every app it has.
+
+        Measured 2026-07-24: a compose with en_US installs and its tile renders.
+        A validator that rejects it would reject the store's own files.
+        """
+        doc = yaml.safe_load(self._minimal())
+        doc["x-casaos"]["title"] = {"en_US": "Demo", "custom": "Demo"}
+        doc["x-casaos"]["description"] = {"en_US": "Demo"}
+        problems, warnings = core.validate(core.dump(doc))
+        self.assertEqual(problems, [])
+        self.assertFalse([w for w in warnings if "description" in w], warnings)
+
+    def test_a_title_without_any_english_is_still_a_blocker(self):
+        doc = yaml.safe_load(self._minimal())
+        doc["x-casaos"]["title"] = {"de_DE": "Beispiel"}
+        problems, _ = core.validate(core.dump(doc))
+        self.assertTrue(any("no English text" in p for p in problems), problems)
+
     def test_the_cli_ships_no_placeholder_icon(self):
         """box.png resolves — and is the Box.com logo. A default that passes the
         reachability check while showing a foreign brand is the worst case:
