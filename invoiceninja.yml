@@ -257,6 +257,14 @@ x-casaos:
     - amd64
     - arm64
   main: nginx
+  # Reverse-domain id, required by the ZimaOS app store (v2). It names who
+  # publishes this file, not who writes Invoice Ninja — change it if you fork.
+  id: io.github.chicohaager.invoiceninja
+  scheme: http
+  # No `version:` on purpose. The store wants one, but the app image here tracks
+  # `:latest`, so any number written down would be a claim the file cannot keep.
+  # Pin the image tag (e.g. invoiceninja-debian:5.13.26) before publishing this
+  # in a store, and put that same value here.
   author: Lintuxer
   developer: Invoice Ninja
   category: Finance

@@ -906,12 +906,68 @@ KEPT_KEYS = [
 DROPPED_KEYS = {"build", "networks", "ports", "volumes", "deploy", "network_mode", "links", "expose"}
 
 
+GITHUB_HOSTS = ("github.com", "raw.githubusercontent.com", "cdn.jsdelivr.net")
+
+
+def suggest_store_id(source_url, app_id):
+    """A reverse-domain app id, derived from the source — or "" if we cannot know one.
+
+    The ZimaOS app store (v2 protocol) requires `x-casaos.id` in reverse-domain
+    form with at least two segments, e.g. `com.example.myapp`
+    (docs/specs/compose-and-x-casaos.md). Nothing in a compose file says who
+    publishes it, so this only fills in the one case that is not a guess: a
+    source hosted on GitHub, where `io.github.<owner>` is the established
+    reverse-DNS form for that account. Anything else returns "" — an invented
+    domain in an identifier is worse than a missing field, because the field is
+    what a store deduplicates on.
+    """
+    if not source_url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(str(source_url))
+    except ValueError:
+        return ""
+    if parsed.hostname not in GITHUB_HOSTS:
+        return ""
+    parts = [p for p in parsed.path.split("/") if p]
+    if parsed.hostname == "cdn.jsdelivr.net":
+        parts = parts[1:]                      # /gh/<owner>/<repo>/...
+    owner = parts[0].split("@")[0] if parts else ""
+    owner = re.sub(r"[^a-z0-9]+", "", owner.lower())
+    app = re.sub(r"[^a-z0-9]+", "", str(app_id or "").lower())
+    if not owner or not app:
+        return ""
+    return f"io.github.{owner}.{app}"
+
+
+def image_version(image):
+    """The app version a store listing can show — read off the image tag.
+
+    Only a concrete tag counts. `latest`, a bare image name or a digest say
+    nothing about which version is installed, and a store entry that claims
+    "latest" as its version is a field that looks filled and carries no
+    information.
+    """
+    text = str(image or "")
+    if "@" in text:                            # image@sha256:… — the tag, if any, sits before it
+        text = text.split("@", 1)[0]
+    last = text.rsplit("/", 1)[-1]
+    if ":" not in last:
+        return ""
+    tag = last.rsplit(":", 1)[1].strip()
+    if not tag or tag.lower() in ("latest", "stable", "main", "master", "edge", "nightly"):
+        return ""
+    return tag
+
+
 def convert(doc, meta, options=None):
     """Compose document → ZimaOS-compliant compose document (multi-service capable).
 
     meta:    dict with name/title/author/category/tagline/description/icon/index/
-             memory/cpus/main
-    options: dict with used_ports (set) — host ports taken on the target system
+             memory/cpus/main/store_id/version
+    options: dict with used_ports (set) — host ports taken on the target system,
+             and source_url (str) — where the compose came from, used to suggest
+             a store id
     """
     options = options or {}
     services_in = doc.get("services") or {}
@@ -1040,6 +1096,14 @@ def convert(doc, meta, options=None):
 
     web_port = str(main_ports[0]["published"])
 
+    # Store metadata (v2 protocol). Only written when it is known: a store id we
+    # invented, or a version that says "latest", is a filled-looking field with
+    # nothing behind it — and the validator can no longer tell that it is missing.
+    store_id = str(meta.get("store_id") or "").strip() \
+        or suggest_store_id(options.get("source_url"), app_id)
+    app_version = str(meta.get("version") or "").strip() \
+        or image_version((services_in[main] or {}).get("image"))
+
     result = {
         "name": app_id,
         "services": services_out,
@@ -1055,12 +1119,31 @@ def convert(doc, meta, options=None):
             "tagline": {"en_us": meta.get("tagline") or "Self-hosted app"},
             "description": {"en_us": meta.get("description") or meta.get("tagline") or "Self-hosted app"},
             "index": meta.get("index") or "/",
+            # Not part of the v2 store field matrix, but what ZimaOS' own
+            # custom-app path writes — kept for the install case.
             "is_uncontrolled": False,
+            # We only ever generate plain HTTP port mappings, so this is a fact,
+            # not a default. The app grid reads it (§27.6).
+            "scheme": "http",
             # Rule 5: port_map as a string, otherwise the tile vanishes wordlessly.
             "port_map": web_port,
         },
     }
-    return result, {"main": main, "web_port": web_port, "warnings": warnings, "app_id": app_id}
+    # Order matters only for the reader: `id` and `version` belong with the other
+    # identity fields, not appended after port_map.
+    if store_id or app_version:
+        xc = result["x-casaos"]
+        ordered = {}
+        for key, value in xc.items():
+            ordered[key] = value
+            if key == "main":
+                if store_id:
+                    ordered["id"] = store_id
+                if app_version:
+                    ordered["version"] = app_version
+        result["x-casaos"] = ordered
+    return result, {"main": main, "web_port": web_port, "warnings": warnings, "app_id": app_id,
+                    "store_id": store_id, "version": app_version}
 
 
 def dump(doc):
@@ -1272,6 +1355,26 @@ def validate(text):
 
     if not casaos.get("icon"):
         warnings.append("No icon set — the tile stays empty (Rule 8).")
+
+    # Store readiness (v2 protocol). None of this stops an installation, which is
+    # why it is a warning — but without it the compose cannot go into any app
+    # store, and that is invisible until someone tries.
+    store_id = casaos.get("id")
+    if store_id is None:
+        warnings.append(
+            "x-casaos.id is missing — installs fine, but the app store (v2) requires a "
+            "reverse-domain id like 'io.github.you.myapp'. Set it with --app-id."
+        )
+    elif not isinstance(store_id, str) or len([p for p in str(store_id).split(".") if p]) < 2:
+        problems.append(
+            f"x-casaos.id {store_id!r} is not a reverse-domain id — it needs at least two "
+            f"non-empty dot-separated segments (e.g. 'io.github.you.myapp')."
+        )
+    if not casaos.get("version"):
+        warnings.append(
+            "x-casaos.version is missing — required for an app store listing. It is read "
+            "off the image tag; an image on ':latest' cannot supply one."
+        )
     if casaos.get("category") and casaos["category"] not in VALID_CATEGORIES:
         warnings.append(f"Category '{casaos['category']}' is not a ZimaOS standard category.")
     if not (casaos.get("title") or {}).get("en_us"):
@@ -1469,6 +1572,9 @@ def build_from_source(url_or_path, meta, variables=None, options=None):
         except yaml.YAMLError as e:
             raise ConvertError(f"The compose YAML is not parsable: {e}") from e
 
+    # The source URL is the only honest basis for a store id — hand it down
+    # instead of making every caller remember to.
+    options.setdefault("source_url", effective if not options.get("source_text") else "")
     result, info = convert(doc, meta, options)
     yaml_text = dump(result)
     problems, warnings = validate(yaml_text)
