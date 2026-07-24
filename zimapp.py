@@ -50,6 +50,10 @@ from zimapp_core import ConvertError
 # 7) Persistent data belongs under /DATA/AppData/<app>/ — that is the only
 #    anchor that the ZimaOS redirections act on.
 # 8) icon has to be a reachable URL, otherwise the tile stays empty.
+# 9) No literal "$" in any value. ZimaOS collapses the compose escape "$$" to
+#    "$" when it stores the file, and the docker compose that follows then
+#    substitutes it away — the container starts, the app stays "running", and
+#    only its log knows why nothing answers (§27.11, measured 2026-07-24).
 #
 # Multi-service stacks (app + database) are ONE app: x-casaos.main points at
 # the WebUI service, port_map at its host port, all services hang off
@@ -271,7 +275,7 @@ def cmd_install(args):
         failed += 0 if s["ok"] else 1
     if failed:
         die(f"{failed} check(s) failed — the app is installed but not usable as it stands.")
-    print("The app is up and reachable." + (" All expectations hold." if expectations else ""))
+    print("The app is up and answering." + (" All expectations hold." if expectations else ""))
 
 
 def cmd_uninstall(args):
@@ -486,7 +490,7 @@ def cmd_update(args):
         failed += 0 if s["ok"] else 1
     if failed:
         die(f"{failed} check(s) failed after the update.")
-    print("The app is up and reachable.")
+    print("The app is up and answering.")
 
 
 def cmd_blueprints(args):

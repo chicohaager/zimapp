@@ -380,6 +380,10 @@ def api_postcheck(payload):
         compose_text=payload.get("yaml"),
         expectations=expectations,
         timeout=int(payload.get("timeout") or 180),
+        # Shorter than the CLI default on purpose: this one blocks a browser
+        # request. A 5xx that is still there after a minute is reported as a
+        # 5xx instead of holding the request open until the app finally starts.
+        serve_timeout=int(payload.get("serve_timeout") or 60),
     )
     return {"steps": steps, "ok": all(s["ok"] for s in steps)}
 

@@ -5,6 +5,13 @@
 /*.yml
 !zimapp-src.yml
 !zimapp-zimaos.yml
+# Exception with a reason: invoiceninja.yml is not the output of a conversion —
+# the converter cannot produce it (see README), it is source, and shipping it is
+# the whole point. Its secrets are generated for the file and marked "change
+# this" three times. ⚠️ They are the values the verification install ran with,
+# so that the shipped bytes are the tested bytes — whoever keeps that install
+# has to change the admin password, because this file is public.
+!invoiceninja.yml
 
 __pycache__/
 *.pyc
