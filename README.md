@@ -260,15 +260,15 @@ says so every time rather than quietly leaving it out.
 ### After the install
 
 `install` does not stop at the API's "accepted". It polls the app grid until the
-app reports `running`, then probes the port, and — if a blueprint of that name
-exists — runs its expectations:
+app reports `running`, then waits for the port to answer with something other
+than a 5xx, and — if a blueprint of that name exists — runs its expectations:
 
 ```text
 Waiting for the app (HTTP 200 means accepted, not done)…
   t+   0s  not in the grid yet
   t+   3s  running
   [ok  ] app in the grid — status 'running' after 3s
-  [ok  ] reachable at http://192.168.1.100:8790 — HTTP 200
+  [ok  ] answers at http://192.168.1.100:8790 — HTTP 200
 ```
 
 When something fails, the check names the cause instead of the symptom:
@@ -278,7 +278,15 @@ When something fails, the check names the cause instead of the symptom:
 | app never appears | which referenced images are missing on the host (and that `uninstall` deleted them) |
 | port unreachable, ZFW active | open the port, then `zfw apply` **and** `zfw commit` — without apply the rule does nothing (§13.2.2) |
 | port unreachable, no ZFW | not the firewall — check `docker logs` |
+| port open, but 5xx behind it | neither firewall nor missing container: the webserver answers, the app behind it does not |
 | no SSH for the diagnosis | says so, instead of guessing |
+
+The 5xx row is there because this check used to report `[ok] reachable — HTTP
+502` and finish with "the app is up". It was measured on the Invoice Ninja
+install: nginx answers within seconds while the app behind it is still migrating
+its database for another ~90s. Any answer at all still proves the port is open —
+that is why it is a separate line and not a firewall hint — but "the port is
+open" is not "the app works", and only one of the two may be printed as a tick.
 
 ## Blueprints — and what "tested" is allowed to mean
 
@@ -396,6 +404,65 @@ YAML 1.1 (so `verified.on` is unreadable by name), and an unquoted `2026-07-19`
 becomes a `datetime.date` that `json.dumps` refuses — which took down
 `/api/defaults` with an empty response. Both are covered by tests now.
 
+## `invoiceninja.yml` — a finished file for a stack the converter cannot handle
+
+Not every upstream compose can be translated automatically, and Invoice Ninja is
+the clearest example in this repo. Upstream's
+[`debian/docker-compose.yml`](https://github.com/invoiceninja/dockerfiles/tree/debian/debian)
+(the maintained branch — `master` carries a deprecation notice) has a `build:`
+section, an `env_file`, named volumes **and** `./nginx:/etc/nginx/conf.d:ro` — a
+bind to a directory of config *files* that only exists in a git checkout. ZimaOS
+would create that directory empty; nginx then starts with no server block at all
+and answers nothing. There is no rule that turns that into a working app, so
+this one is hand-built and verified instead of generated:
+
+```bash
+python3 zimapp.py validate invoiceninja.yml
+python3 zimapp.py install invoiceninja.yml --host <ip> --user <zimaos-user>
+```
+
+Four services, one ZimaOS app: `invoiceninja/invoiceninja-debian` (php-fpm,
+queue worker, scheduler, Chrome for PDFs), `nginx:alpine`, `mysql:8`,
+`redis:alpine`. All four images exist for amd64 **and** arm64 (checked against
+their manifests). The nginx container writes upstream's two config files itself
+on start, which keeps the whole thing one self-contained file.
+
+**Change three things before installing** — the file says so at the top too:
+`APP_URL` (host *and* port, it ends up in PDFs and mails), `APP_KEY` (the file
+ships one, so every copy of the file shares it) and `IN_PASSWORD` (the first
+admin account, created once on first start). The shipped values are real and
+they work, which is exactly why they are worthless as secrets: they are printed
+in this repository, and the verification install below ran with them so that the
+tested bytes and the shipped bytes are the same bytes.
+
+🔴 **The trap this file exists to document: a literal `$` does not survive the
+install API.** The nginx config needs `$uri`, so the compose held the usual
+escape `$$uri`. Measured on v1.7.0-beta1: ZimaOS stores that as `$uri`, and the
+`docker compose up` that follows reads it as one of *its* variables and
+substitutes the empty string. nginx came up with `try_files  / /index.php?;`,
+died with `invalid number of arguments`, went into a restart loop — and the app
+status stayed **`running`** the whole time, because the other three containers
+were fine. Writing `$$$$` would fix ZimaOS and break a plain `docker compose up`;
+a file with no `$` at all is right on both paths, so the config carries `@uri`
+and the container translates it (`tr '@' '\044'`) one line before nginx starts.
+The validator now blocks any literal `$` in a value — including a generated
+password that happens to contain one.
+
+⚠️ `docker compose config` cannot prove this either way: it re-escapes `$` back
+to `$$` in its output, so "escape survived" and "escape was consumed" look
+identical. The witnesses are the stored compose on the host and the file inside
+the running container.
+
+![Invoice Ninja running as a ZimaOS app: the dashboard after logging in with the
+admin account the compose created on first start](docs/screenshot-invoiceninja.jpg)
+
+*Verified 2026-07-24 on ZimaOS v1.7.0-beta1 (192.168.1.147): installed from this
+file, all four containers up, app container `healthy`, `/health` returning
+`{"status":"ok"}`, tile in the grid with the Invoice Ninja icon, and the admin
+account logged in through the browser to the dashboard above. Also re-checked
+after a container restart, and `RestartPolicy` really is `unless-stopped` on all
+four (§28).*
+
 ## What the converter translates
 
 | From the source | Becomes |
@@ -474,6 +541,13 @@ All verified on the live system, not copied from the docs:
    `icon.casaos.io`, then at `selfh.st/icons`, and only fills in what really
    answers. Nothing found → the field stays empty and says so. An empty tile is
    visible; a foreign logo looks like it worked.
+9. 🔴 **No literal `$` in any value.** ZimaOS collapses the compose escape `$$`
+   to `$` when it stores the file, and the `docker compose up` that follows
+   substitutes that away (measured 2026-07-24 — see `invoiceninja.yml` above).
+   The rule names the exact path (`services.nginx.command[2]`) and quotes the
+   line, because the effect is invisible everywhere else: the container starts,
+   the app status stays `running`, and only the container log knows why nothing
+   answers. A `${VAR}` reference is *not* reported here — it has its own message.
 
 Additionally validated: `x-casaos.main` points to an existing service,
 `port_map` really is one of its published ports, no duplicate or
@@ -553,12 +627,14 @@ rule has to come by there.
 
 | File | Content |
 | --- | --- |
-| `zimapp.py` | CLI + the eight rules as a comment |
+| `zimapp.py` | CLI + the nine rules as a comment |
 | `zimapp_core.py` | converter: fetch, detect, variables, rewrite, validate, API |
 | `zimapp_web.py` | HTTP server and JSON API of the web UI |
 | `static/` | UI (`index.html`, `app.js`, `styles.css` in the ZFW color scheme) |
 | `test_zimapp.py` | regression tests |
 | `blueprints/` | tested recipes: pinned source, the values an app needs, expectations |
+| `invoiceninja.yml` | finished, verified Invoice Ninja app (hand-built — the converter cannot do this one) |
+| `paperless-ngx.yml` | the compose the paperless-ngx blueprint generates, as installed |
 | `zimapp-zimaos.yml` | ready-to-install ZimaOS compose on the released image |
 | `Dockerfile`, `zimapp-src.yml` | build and deployment as a ZimaOS app |
 | `docs/` | the screenshots in this README |

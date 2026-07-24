@@ -1166,6 +1166,41 @@ def framework_checks(services):
     return problems, warnings
 
 
+def dollar_findings(doc, limit=3):
+    """Every literal '$' in a value — it does not survive the install API.
+
+    Measured on ZimaOS v1.7.0-beta1 (2026-07-24, .147): the API collapses the
+    compose escape '$$' back to a single '$' while storing the file, and the
+    'docker compose up' that follows reads that '$' as one of its own variables
+    and substitutes the empty string. An nginx config that a container wrote
+    from its own 'command:' arrived as `try_files  / /index.php?;` — nginx came
+    up, answered 502, and nothing anywhere said why.
+
+    Doubling the escape ('$$$$') repairs the ZimaOS path and breaks a plain
+    'docker compose up', so the only value that is right on both is one without
+    a '$' at all. Same for a generated password that happens to contain one.
+
+    Returns [(path, value)], at most `limit` entries.
+    """
+    hits = []
+
+    def walk(node, path):
+        if len(hits) >= limit:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+        elif isinstance(node, str) and "$" in VAR_RE.sub("", node):
+            line = next((l for l in node.splitlines() if "$" in VAR_RE.sub("", l)), node)
+            hits.append((path, line.strip()))
+
+    walk(doc, "")
+    return hits
+
+
 def validate(text):
     """Checks exactly those traps that ZimaOS acknowledges silently or cryptically.
 
@@ -1187,6 +1222,17 @@ def validate(text):
         return [f"YAML is not parsable: {e}"], warnings
     if not isinstance(doc, dict):
         return ["YAML contains no mapping at the top level."], warnings
+
+    dollars = dollar_findings(doc)
+    if dollars:
+        problems.append(
+            "A literal '$' does not survive the install API: ZimaOS collapses the compose "
+            "escape '$$' to '$' when it stores the file, and 'docker compose up' then "
+            "substitutes that away (measured 2026-07-24, v1.7.0-beta1 — an nginx config "
+            "arrived as 'try_files  / /index.php?;'). Write the value without a '$' — e.g. "
+            "with a placeholder character that the container translates at start. Found at: " +
+            "; ".join(f"{path} ({value!r})" for path, value in dollars)
+        )
 
     if not str(doc.get("name") or "").strip():
         problems.append("Top-level 'name:' is missing — ZimaOS needs it as the app ID (Rule 4).")
@@ -2396,23 +2442,42 @@ def wait_for_app(host, name, user, password, timeout=300, interval=3, on_progres
 
 
 def http_probe(url, timeout=10):
-    """Is something answering there? Any HTTP status counts as reachable.
+    """Is something answering there? Returns (reachable, detail, status).
 
-    A 401 or 302 means the app is up and doing its job — only 'no answer at all'
-    is the interesting failure, because that is what a closed firewall port and
-    a dead container look like from outside.
+    A 401 or 302 means the app is up and doing its job — 'no answer at all' is
+    what a closed firewall port and a dead container look like from outside, and
+    `status` is None for it. A 5xx is a third case: the port is open, so it is
+    neither of those, but the app behind the webserver is not serving either.
     """
     req = urllib.request.Request(url, method="GET", headers={"User-Agent": "zimapp"})
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return True, f"HTTP {resp.status}"
+            return True, f"HTTP {resp.status}", resp.status
     except urllib.error.HTTPError as e:
-        return True, f"HTTP {e.code}"
+        return True, f"HTTP {e.code}", e.code
     except urllib.error.URLError as e:
-        return False, f"{e.reason}"
+        return False, f"{e.reason}", None
     except OSError as e:
-        return False, f"{e}"
+        return False, f"{e}", None
+
+
+def wait_for_http(url, timeout=180, interval=5, on_progress=None):
+    """Poll until the answer is neither silence nor a 5xx.
+
+    Right after an install a 502 is the normal picture while the app behind the
+    webserver still migrates its database — Invoice Ninja needs ~90s past the
+    point where ZimaOS already reports 'running'. Probing once and calling that
+    'reachable' turns a stack that is not usable yet into a green tick.
+    """
+    deadline = time.time() + timeout
+    reachable, detail, status = http_probe(url)
+    while time.time() < deadline and (not reachable or (status or 0) >= 500):
+        if on_progress:
+            on_progress(int(timeout - (deadline - time.time())), detail)
+        time.sleep(interval)
+        reachable, detail, status = http_probe(url)
+    return reachable, detail, status
 
 
 def zfw_active(host, ssh_user):
@@ -2470,7 +2535,7 @@ def missing_images(host, ssh_user, compose_text):
 
 
 def post_install_check(host, name, user, password, ssh_user=None, compose_text=None,
-                       expectations=None, timeout=300, on_progress=None):
+                       expectations=None, timeout=300, serve_timeout=180, on_progress=None):
     """Everything between "accepted" and "actually usable", as structured steps.
 
     Each step is {step, ok, detail, hint}. Nothing here raises for a failed
@@ -2501,8 +2566,15 @@ def post_install_check(host, name, user, password, ssh_user=None, compose_text=N
         return steps
 
     url = f"http://{host}:{port}"
-    reachable, detail = http_probe(url)
-    step = {"step": f"reachable at {url}", "ok": reachable, "detail": detail, "hint": ""}
+    reachable, detail, status = wait_for_http(url, timeout=serve_timeout)
+    serving = reachable and (status or 0) < 500
+    step = {"step": f"answers at {url}", "ok": serving, "detail": detail, "hint": ""}
+    if reachable and not serving:
+        step["hint"] = (
+            f"the port is open, so this is neither the firewall nor a missing container: the "
+            f"webserver answers, the application behind it does not (still {detail} after "
+            f"{serve_timeout}s). 'docker logs' on the app's own service says why."
+        )
     if not reachable:
         active = zfw_active(host, ssh_user)
         if active is True:

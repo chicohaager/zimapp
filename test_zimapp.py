@@ -249,6 +249,31 @@ class Validator(unittest.TestCase):
         problems, _ = core.validate(self._minimal().replace("nginx", "nginx:${TAG}"))
         self.assertTrue(any("Unresolved variables" in p for p in problems))
 
+    def test_literal_dollar_in_a_value_is_a_blocker(self):
+        """Measured: ZimaOS stores '$$' as '$', then compose eats it.
+
+        The file that broke was an nginx config written by the container's own
+        command — it arrived as `try_files  / /index.php?;`, nginx answered 502
+        and no layer in between said a word.
+        """
+        doc = yaml.safe_load(self._minimal())
+        doc["services"]["app"]["command"] = ["/bin/sh", "-c", "echo try_files $$uri; nginx"]
+        problems, _ = core.validate(core.dump(doc))
+        self.assertTrue(any("literal '$'" in p for p in problems), problems)
+        self.assertTrue(any("services.app.command[2]" in p for p in problems), problems)
+
+    def test_a_password_with_a_dollar_is_caught_too(self):
+        """Same trap, undramatic disguise: a generated secret containing '$'."""
+        doc = yaml.safe_load(self._minimal())
+        doc["services"]["app"]["environment"] = ["ADMIN_PASSWORD=abc$def"]
+        problems, _ = core.validate(core.dump(doc))
+        self.assertTrue(any("literal '$'" in p for p in problems), problems)
+
+    def test_a_variable_reference_is_not_reported_twice(self):
+        """${TAG} already has its own message — it must not also count as a '$'."""
+        problems, _ = core.validate(self._minimal().replace("nginx", "nginx:${TAG}"))
+        self.assertFalse(any("literal '$'" in p for p in problems), problems)
+
     def test_main_must_exist(self):
         text = self._minimal().replace("main: app", "main: doesnotexist")
         problems, _ = core.validate(text)
@@ -556,10 +581,10 @@ class PostInstall(unittest.TestCase):
             compose_text="services:\n  a:\n    image: zimapp:local\n")
         self.assertIn("all images are present", steps[0]["hint"])
 
-    def _with_probe(self, reachable, zfw):
+    def _with_probe(self, reachable, zfw, status=200):
         """Stub the probe and the firewall check — no real port may decide this."""
         probe, zfw_fn = core.http_probe, core.zfw_active
-        core.http_probe = lambda url, timeout=10: (reachable, "stub")
+        core.http_probe = lambda url, timeout=10: (reachable, "stub", status if reachable else None)
         core.zfw_active = lambda host, ssh_user: zfw
         self.addCleanup(lambda: (setattr(core, "http_probe", probe),
                                  setattr(core, "zfw_active", zfw_fn)))
@@ -567,7 +592,8 @@ class PostInstall(unittest.TestCase):
     def test_unreachable_port_with_active_zfw_names_apply_and_commit(self):
         core.api = self._grid("running")
         self._with_probe(reachable=False, zfw=True)
-        steps = core.post_install_check("h", "app", "u", "p", ssh_user="zima", timeout=3)
+        steps = core.post_install_check("h", "app", "u", "p", ssh_user="zima",
+                                        timeout=3, serve_timeout=0)
         self.assertFalse(steps[1]["ok"])
         self.assertIn("zfw apply", steps[1]["hint"])
         self.assertIn("commit", steps[1]["hint"])
@@ -576,26 +602,42 @@ class PostInstall(unittest.TestCase):
         """Wrong advice is worse than none: no ZFW means it is not the firewall."""
         core.api = self._grid("running")
         self._with_probe(reachable=False, zfw=False)
-        steps = core.post_install_check("h", "app", "u", "p", ssh_user="zima", timeout=3)
+        steps = core.post_install_check("h", "app", "u", "p", ssh_user="zima",
+                                        timeout=3, serve_timeout=0)
         self.assertIn("not active", steps[1]["hint"])
         self.assertIn("docker logs", steps[1]["hint"])
 
     def test_unknown_firewall_state_is_admitted(self):
         core.api = self._grid("running")
         self._with_probe(reachable=False, zfw=None)
-        steps = core.post_install_check("h", "app", "u", "p", timeout=3)
+        steps = core.post_install_check("h", "app", "u", "p", timeout=3, serve_timeout=0)
         self.assertIn("could not determine", steps[1]["hint"])
 
     def test_reachable_app_passes(self):
         core.api = self._grid("running")
         self._with_probe(reachable=True, zfw=None)
-        steps = core.post_install_check("h", "app", "u", "p", timeout=3)
+        steps = core.post_install_check("h", "app", "u", "p", timeout=3, serve_timeout=0)
         self.assertTrue(all(s["ok"] for s in steps))
+
+    def test_a_502_is_not_reported_as_up(self):
+        """Measured on Invoice Ninja: nginx answers long before the app does.
+
+        An open port with a 5xx behind it is neither a firewall problem nor a
+        running app — reporting it as 'reachable, ok' is the green tick that
+        makes nobody look further.
+        """
+        core.api = self._grid("running")
+        self._with_probe(reachable=True, zfw=None, status=502)
+        steps = core.post_install_check("h", "app", "u", "p", timeout=3, serve_timeout=0)
+        self.assertFalse(steps[1]["ok"])
+        self.assertIn("the port is open", steps[1]["hint"])
+        self.assertNotIn("firewall is active", steps[1]["hint"])
 
     def test_http_probe_counts_any_answer_as_reachable(self):
         """401/302 mean the app is up and doing its job — only silence is a failure."""
-        ok, detail = core.http_probe("http://127.0.0.1:9")
+        ok, detail, status = core.http_probe("http://127.0.0.1:9")
         self.assertFalse(ok)
+        self.assertIsNone(status)
 
     def test_missing_images_without_ssh_returns_none(self):
         """No SSH means 'cannot tell' — which must not be reported as 'nothing missing'."""
