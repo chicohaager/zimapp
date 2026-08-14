@@ -779,6 +779,13 @@ python3 zimapp.py validate kopia.yml
 python3 zimapp.py install  kopia.yml --host <ip> --user <zimaos-user>
 ```
 
+Since 2026-08-14 this one is also in the "Lintuxer Apps" store, as
+[`Apps/Kopia/`](https://github.com/chicohaager/zima-appstore/tree/main/Apps/Kopia).
+The two files differ in exactly one place: the store copy points its icon at the
+store repo instead of jsDelivr, same image bytes. Installing from the store is
+the better route here, because `tips.before_install` — the warning about the
+three passwords — only reaches a store install.
+
 *Verified 2026-08-13 on ZimaOS v1.7.1-beta1 (ZimaCube Pro, amd64): installed from
 this file, tile after 9 s, `health=healthy`, `RestartPolicy=unless-stopped`,
 `Config.Cmd` exactly the five arguments written here, and the image's
@@ -972,12 +979,21 @@ before planning around it:
 
 A worked example of that own store is
 [chicohaager/zima-appstore](https://github.com/chicohaager/zima-appstore) ("Lintuxer
-Apps"), which ships the Invoice Ninja file below. Registering it, serving the app
-through `GET /apps` and unregistering it again without residue are all measured;
-what is **not** solved is the App Store UI, which does not render a third-party
-store as its own group. Three candidate mechanisms are ruled out — the catalog
-carries no store field on an app record, `store_app_id` is just the app's folder
-name, and `category-list.json` is unused even by the store that has one.
+Apps"), which ships ten apps including the Invoice Ninja and Kopia files below.
+Registering it, serving the apps through `GET /apps` and unregistering it again
+without residue are all measured, and the App Store UI **does** render it as its
+own group under community stores — the earlier note here said it did not, which
+was the wrong protocol rather than missing metadata: the v3 catalog carries a
+`repo_id` on every app record, and that is what the UI groups by.
+
+🔴 **A registered store never syncs by itself.** No sync endpoint, no timer, and
+a service restart does not trigger one either — a source is fetched when it is
+registered and then never again, so a host can sit on a months-old catalog while
+the published one has moved. The only way through is `DELETE` followed
+immediately by `POST /v3/app_store/repo`. Measured again on 2026-08-14: after
+publishing Kopia the host still knew 9 apps while the catalog had 10; after the
+delete/re-register it knew 10. The witness is `GET /v3/app_store/hub/app/list`,
+never the `POST`'s own answer.
 
 Additionally validated: `x-casaos.main` points to an existing service,
 `port_map` really is one of its published ports, no duplicate or
