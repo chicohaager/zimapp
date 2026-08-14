@@ -456,12 +456,393 @@ the running container.
 ![Invoice Ninja running as a ZimaOS app: the dashboard after logging in with the
 admin account the compose created on first start](docs/screenshot-invoiceninja.jpg)
 
-*Verified 2026-07-24 on ZimaOS v1.7.0-beta1 (192.168.1.147): installed from this
+*Verified 2026-07-24 on ZimaOS v1.7.0-beta1 (ZimaCube, amd64): installed from this
 file, all four containers up, app container `healthy`, `/health` returning
 `{"status":"ok"}`, tile in the grid with the Invoice Ninja icon, and the admin
 account logged in through the browser to the dashboard above. Also re-checked
 after a container restart, and `RestartPolicy` really is `unless-stopped` on all
 four (§28).*
+
+## `soulsync.yml` — a finished file the converter got 80 % of the way
+
+[SoulSync](https://github.com/Nezreka/SoulSync) (music discovery, download and
+library automation, plus a video library) is the counter-example to Invoice
+Ninja: `zimapp.py convert` on upstream's own `docker-compose.yml` produces
+something that installs and runs. What it *cannot* know is where the files
+belong on ZimaOS, and that is most of what makes this app useful:
+
+- Upstream leaves the **output mount commented out** (`# - ./Transfer:/app/Transfer`),
+  with a comment explaining that the app needs one. A converter has nothing to
+  translate there; a finished package has to name a folder.
+- ZimaOS has **its own opinion about where media goes**, and it is not in the
+  app data directory. Measured in the firmware's app UI bundle on
+  v1.7.0-beta1: a container path containing `Music` is offered `/Media/Music`,
+  `movies` → `/Media/Movies`, `tv` → `/Media/TV Shows`, `download` →
+  `/Downloads`, `config` → `/AppData/<app>/…`. This file follows exactly that,
+  which is also what a Plex/Jellyfin/Navidrome next door already reads.
+- `/app/scripts` is the one directory that is **not empty in the image** (four
+  example scripts). The bind hides them; the header carries the one-line
+  `docker run` that copies them into the host directory, and that command was
+  run, not just written down.
+- The mounts were then chosen to **match the config the app writes itself**:
+  read back after the install, `soulseek.download_path` is `/app/downloads` and
+  `soulseek.transfer_path` is `/app/Transfer` — the two paths that matter for
+  music need no UI step at all. Only the video libraries have to be added in the
+  UI, because the default config has no video paths in it.
+
+🔴 **The permission rule this file pins down.** The container runs as uid 1000,
+so every mount has to be writable for uid 1000 — and who creates a missing bind
+source decides whether it is: **ZimaOS creates it mode 0777** (measured on
+install: `/DATA/AppData/soulsync/*` as `1000:1000 0777`, and
+`/DATA/Media/YouTube` as `root:root 0777`, i.e. also outside the app data
+directory), while **`docker compose up` by hand creates it `root:root 0755`**
+and uid 1000 is then denied. Same file, same paths, two different outcomes.
+Anyone re-pointing a mount at an existing folder has to check it themselves —
+the app starts either way, the tile is green either way, and only the container
+log says "Host bind-mount perms likely mismatch the PUID/PGID env vars".
+
+```bash
+python3 zimapp.py validate soulsync.yml
+python3 zimapp.py install  soulsync.yml --host <ip> --user <zimaos-user>
+```
+
+*Verified 2026-07-28 on ZimaOS v1.7.0-beta1 (ZimaCube, amd64): installed from
+this file, app in the grid after 3 s, container `healthy`, 0 restarts,
+`RestartPolicy` `unless-stopped`. All eleven mounts appear in `docker inspect`
+— including `/DATA/Media/TV Shows`, so the space in that path survives the
+install API — and all eleven are writable as uid 1000, tested from inside the
+running container. WebUI on 8008 clicked through in the browser (setup wizard →
+dashboard, "Media scan completed", Deezer and Hybrid `Connected`), and the tile
+carries SoulSync's own logo — the same mark the app draws in its own wizard,
+checked by eye. Not verified: a real Soulseek download (needs slskd and an
+account), the OAuth round-trip, and arm64 (the image exists for it per the
+manifest; nothing here ran on it).*
+
+## `slskd.yml` — the download backend, and how two ZimaOS apps are wired together
+
+SoulSync needs a Soulseek client, so this repo ships one:
+[slskd](https://github.com/slskd/slskd) as its own ZimaOS app, pinned to
+`slskd/slskd:0.26.0`. Upstream has no compose file to convert — their
+`docs/docker.md` documents `docker run` and a compose *example* — so this one is
+hand-built from `docs/docker.md` and `docs/config.md`, and every environment
+variable in it was read off the table in those docs rather than copied from
+somebody else's compose comment.
+
+**The wiring is one shared folder, not a network.** Two ZimaOS apps are two
+compose projects in two bridge networks, so service names do not resolve between
+them; that is why `soulsync.yml` carries `extra_hosts: host.docker.internal`.
+slskd writes finished downloads into `/DATA/Downloads` (`SLSKD_DOWNLOADS_DIR`),
+which is the same host folder SoulSync reads as `/app/downloads`. Both containers
+run as uid 1000, so SoulSync may move what slskd wrote. Incomplete downloads stay
+in `/app/incomplete` inside slskd's own data directory, so a half-written file
+never shows up in the shared folder.
+
+In SoulSync only **one field** has to be filled: **Settings → Downloads →
+"Source Settings"** (expand it — the fields sit under the *Test all sources*
+button, labelled `slskd URL:` and `API Key:`), then *Save Settings* top right.
+Clicked through on the running app, v3.1.9. The URL is already correct, because
+`slskd_url: http://host.docker.internal:5030` is SoulSync's own shipped default
+(read out of `/defaults/config.json` in the image), and the `api_key` default is
+the literal placeholder `SoulseekAPIKey` — which is why slskd's log fills with
+`Unauthorized request … Unknown API key beginning with: Soul` until the real key
+is pasted. That line is the two apps meeting, not a broken install.
+
+**The Soulseek account goes into slskd's own config**, in the `soulseek:` block
+at the bottom of `/DATA/AppData/slskd/app/slskd.yml` (`username:`, `password:`)
+— and it goes there **through the web UI**, System → Options, not by editing the
+file: the file belongs to uid 1000 while a ZimaOS shell user is uid 999
+(`Permission denied`, measured), and the UI writes it with
+`PUT /api/v0/options/yaml`, which is JWT-and-Administrator-only and validates the
+YAML before writing (upstream's `OptionsController.cs`). The same policy is why
+the API key SoulSync uses cannot read that config at all — 401 by design, so the
+key drives transfers, not configuration.
+
+⚠️ **Change what the compose sets as an environment variable in the compose, not
+in that YAML.** Upstream documents the YAML file as loaded *after* environment
+variables, but on this install the opposite held: writing
+`directories: downloads:` into it while `SLSKD_DOWNLOADS_DIR` was set changed
+nothing in 15 s and produced no reload signal (`pendingRestart` stayed false, no
+log line). Whether that is precedence or a watcher that did not fire was **not**
+established — so the env vars are the authority here, and the YAML is for what
+the compose does not set: the account, shares, rooms, limits.
+
+**What the file does not do, deliberately:** it does not share your library.
+Sharing is the etiquette on Soulseek, and sharing nothing is how individual users
+come to ignore or block you — but a package should not switch on "upload to
+strangers" for you. (SoulSync's setup guide calls not sharing a ban risk; the
+official Soulseek FAQ documents no automatic network ban for it, and the
+protocol's `BANNED` login rejection is marked obsolete. It is per-user blocking,
+not a server rule.) The music library is mounted **read-only** at `/music` and
+left undeclared; one line in `environment` (`SLSKD_SHARED_DIR=/music`) or one
+entry in the UI turns it into a share.
+
+And it does not invent a Soulseek account: without one slskd starts, answers, and
+connects to nothing (measured — the API reports `soulseek.username: null`). There
+is no second piece of software to install for it, and no registration site
+either: slskd *is* the Soulseek client, and a username is claimed by the login
+itself — the protocol's login rejection list carries `SVRPRIVATE` ("server does
+not accept registrations") next to `INVALIDPASS` ("password for existing user is
+incorrect"), so an unused name is created on first login. Worth knowing before
+you pick one: the official FAQ says usernames are recycled after "a full month of
+the person not logging in".
+
+Two ZimaOS facts came out of it, both measured on the install: the API takes
+`user: '1000:1000'` (so the process is never root — upstream calls that
+objectively better than the PUID/PGID method) and it takes `read_only: true` on a
+long-form volume. Also worth knowing before you pick a category: a ZimaOS box
+carries **two category vocabularies** — the nine the maintained stores use, and
+the 20 CasaOS names the bundled `default` store still ships, which is where a
+`Downloader` category would come from. `Media` exists in both.
+
+```bash
+python3 zimapp.py validate slskd.yml
+python3 zimapp.py install  slskd.yml --host <ip> --user <zimaos-user>
+```
+
+*Verified 2026-07-28 on ZimaOS v1.7.0-beta1 (ZimaCube, amd64), installed from
+this file next to SoulSync: app in the grid after 9 s, 0 restarts,
+`unless-stopped`, `docker inspect` shows `User=1000:1000` and `id` inside the
+container agrees, `/music` mounted `RW=false`. slskd's own log: listening on
+5030, 5031 and 50300, "Aborting shared file scan; no shares configured" — sharing
+really is off. Its effective config (`GET /api/v0/options`) reports
+`downloads: /downloads`, `incomplete: /app/incomplete`, `shares: []`. The API
+answers 200 with the shipped key and 401 without it; the shipped web credentials
+return a JWT over `POST /api/v0/session` and a wrong password gets 401. From
+inside the SoulSync container, `http://host.docker.internal:5030` answers 200
+with the key and 401 without — the cross-app path works. A file written by slskd
+into `/downloads` was read and deleted from SoulSync as uid 1000, which is the
+hand-off the two apps do for real. The tile carries slskd's own logo, compared
+against the favicon in their repository. Not verified: an actual Soulseek
+transfer (needs a Soulseek account), port forwarding for 50300, and arm64.*
+
+## `jellyfin.yml` — the other end of the chain, with the GPU passed through
+
+The library SoulSync fills wants a server that plays it, so this repo ships one:
+[Jellyfin](https://github.com/jellyfin/jellyfin) pinned to
+`jellyfin/jellyfin:10.11.11` (the newest stable release — `12.0-rc3`, `preview`
+and `unstable` also exist on Docker Hub and are not it). Built from upstream's
+own compose example on jellyfin.org.
+
+**ZimaOS already has a Jellyfin** in its bundled `default` store, and it works —
+but it publishes 8097/8921 instead of the canonical ports, still mounts
+`/opt/vc/lib` (a Raspberry-Pi-era leftover) and passes **no GPU device**, so
+every transcode runs on the CPU. This file is the same server wired for the
+machine it runs on.
+
+- `/DATA/Media` is mounted **read-only** at `/media`. Jellyfin keeps metadata and
+  artwork in `/config`, so it never needs to write into the library — and a media
+  server that cannot touch your files cannot damage them. One line to change if
+  you want NFO/artwork written next to the media.
+- `/config` and `/cache` are separate directories under `/DATA/AppData/jellyfin/`
+  — the cache is the one that grows and the one that is safe to delete.
+- `devices: /dev/dri` passes the render node in. That is all a compose can do;
+  the rest is one click in Dashboard → Playback (VAAPI, `/dev/dri/renderD128`).
+- `7359/udp` is published for client autodiscovery. DLNA (1900/udp) is not: it
+  was already in use on the host this was tested on, and Jellyfin's DLNA server
+  is off by default anyway.
+- `JELLYFIN_PublishedServerUrl` is deliberately absent — an address belongs to a
+  machine, not to a file that gets copied.
+
+Two more things the ZimaOS install API turned out to accept, both measured here
+for the first time: **`devices:`** and a port with **`protocol: udp`**. Together
+with `user:` from the slskd package, that means an app can use the GPU without
+running as root — as long as the render node allows it. On this ZimaCube
+(Ryzen 7 6800H with Radeon graphics) `/dev/dri/renderD128` is `crw-rw-rw-`, so
+uid 1000 may open it; `/dev/dri/card0` is `crw-rw----` and is not usable, which
+VAAPI does not need.
+
+```bash
+python3 zimapp.py validate jellyfin.yml
+python3 zimapp.py install  jellyfin.yml --host <ip> --user <zimaos-user>
+```
+
+*Verified 2026-07-28 on ZimaOS v1.7.0-beta1 (ZimaCube, amd64): installed from
+this file, app in the grid after 36 s, 0 restarts, `User=1000:1000`,
+`HostConfig.Devices` shows `/dev/dri->/dev/dri`, `PortBindings` shows
+`7359/udp=7359` next to `8096/tcp=8096`, and `/DATA/Media` is mounted
+`RW=false`. From inside the container as uid 1000: `/dev/dri/renderD128` is
+writable (so VAAPI can be switched on), the library lists all six folders, and a
+write into `/media` is refused — read-only is real, not just declared. The setup
+wizard came up in the browser and the tile carries the Jellyfin logo. Not
+verified: an actual hardware transcode, and arm64.*
+
+## `onlyoffice.yml` — one container, and three mounts that other packages get wrong
+
+[ONLYOFFICE Docs](https://github.com/ONLYOFFICE/Docker-DocumentServer) Community
+Edition, pinned to `onlyoffice/documentserver:9.4.0.1` — on 2026-08-07 also what
+`latest` resolved to (same digest `sha256:3ab6ebc7…`). Upstream's own compose
+cannot be converted: it carries a `build:` block, which ZimaOS refuses (§4.4.1),
+and puts everything into anonymous volumes.
+
+It is an **engine, not a portal**. Opening it gives a status page — measured, a
+302 to `/welcome/`. It earns its place next to a file app: Nextcloud, Seafile or
+ownCloud point at `http://<zimaos-ip>:8090/` with the same `JWT_SECRET`.
+
+- **JWT_SECRET is an obvious placeholder**, not a random-looking string. JWT has
+  been on by default since 7.2, and upstream would generate a secret you then
+  have to dig out of the container; this file sets one you are meant to replace.
+  The check is `documentserver-jwt-status.sh` inside the container, not the line
+  in the compose.
+- **Three mounts, not six.** The CasaOS package for this image mounts
+  `/var/lib/postgresql`, `/var/lib/rabbitmq` and `/var/lib/redis` as well. In the
+  Community Edition those three do nothing: none of the directories exists in the
+  image, there is no `postgres`, `rabbitmq-server` or `redis-server` binary in
+  it, and upstream's entrypoint gates all three behind `PRODUCT_EDITION` — which
+  `docker image inspect` shows as **empty** here. They would create three empty
+  host directories and suggest a database that is not there.
+- **443 is not published.** Upstream exposes it, but without a certificate it
+  answers nothing useful; the header names the two paths to fill in instead of
+  shipping a port that looks like HTTPS and is not.
+- **`x-casaos.version` is `9.4.0`, the image tag is `9.4.0.1`** — and that gap is
+  deliberate. A v2 store build drops a version it cannot parse as semver
+  (`WARN … skipping version in index.json`, exit 0, app published without a
+  version), and the fourth digit is ONLYOFFICE's image rebuild anyway. The
+  product version was measured, not shortened: the running server reports
+  `buildVersion: 9.4.0`, `buildNumber: 129` at `/info/info.json`, and the
+  package inside the container is `onlyoffice-documentserver 9.4.0-129`.
+
+```bash
+python3 zimapp.py validate onlyoffice.yml
+python3 zimapp.py install  onlyoffice.yml --host <ip> --user <zimaos-user>
+```
+
+*Verified 2026-08-07 on ZimaOS v1.7.0 (ZimaCube, amd64): installed from this
+file, tile after 3 s, `healthy`, 0 restarts, 365 MiB of the 6 GB limit at idle.
+From the LAN: `/` → 302 → `/welcome/` → 200, and `/web-apps/apps/api/documents/api.js`
+→ 200. A JWT-signed conversion through `/ConvertService.ashx` returned
+`endConvert: true` and the downloaded .docx carries the source text — with the
+negative control that the same request signed with a wrong secret is refused
+(`error: -8`, `checkJwt error: invalid signature` in the log), so the token is
+enforced and not decorative. The editor was opened in a browser through the
+image's built-in test example, text typed, status bar "All changes saved"; that
+service was started at runtime and stopped again — this file does not enable it.
+Not verified: arm64, HTTPS, and an actual third-party connector.*
+
+## `kopia.yml` — a backup tool, and why the store entry is not one
+
+[Kopia](https://github.com/kopia/kopia) pinned to `kopia/kopia:0.23.1` — the
+newest stable release (`GET /repos/kopia/kopia/releases/latest` returns exactly
+this tag, and Docker Hub gives `latest`, `0.23` and `0.23.1` the same push date
+of 2026-06-16). Built from upstream's own compose example on kopia.io.
+
+**The BigBear store already has a Kopia**, registered on this machine as the
+`github.com` source — and this is the case where "already has one" is not good
+enough. It pins `ghcr.io/thespad/kopia-server:v0.17.0-spad3@sha256:e9e9256e…`,
+whose image config says `created: 2024-05-05`: **Kopia v0.17.0, two years and
+three months old**. thespad has published up to v0.23.1; only the pin never
+moved. v0.23.1 is a bugfix release for "a rare race condition which might lead
+to a data loss" — on a backup tool that is not cosmetic. That package also ships
+working credentials in the file (`KOPIA_UI_PASSWORD=casaos`,
+`KOPIA_PASSWORD=casaos`), so anyone who installs it and does not change them runs
+a backup server whose password is printed in a public git repository.
+
+- **The three passwords ship empty, on purpose.** Measured on 0.23.1 with an
+  empty server password: *every* request answers `401` — no credentials, right
+  credentials, wrong credentials, all of them, and the server still starts. So an
+  install without them is **locked, not exposed**, and the failure announces
+  itself with a login box that cannot be satisfied. A working default would have
+  been the invisible failure. The instruction is in **`tips.before_install`**,
+  which ZimaOS shows in its own modal before the install, and repeated shorter in
+  `description` — because `tips` only reaches a user who installs from the
+  **store**: the store build takes it out of the published compose and puts it in
+  `apps/<id>/meta.json`, which the UI fetches separately. Whoever imports this
+  file by hand never gets that record, and for them `description` is the whole
+  warning (§34.7). What *does* reach a hand-imported install is the tile's
+  **notebook**, which `zimapp install` now fills from the same field — see
+  "The notebook" below.
+- **CSRF checks stay on**, unlike upstream's own compose example. `validateCSRFToken`
+  (`internal/server/server_authz_checks.go`) compares the page's
+  `<meta name="kopia-csrf-token">` against the `Kopia-Session-Cookie` and looks at
+  **no** `Origin`, `Host` or `Referer` header — so LAN access needs no relaxation.
+  Measured both ways: the API answered `200` with the page's token even with
+  `Origin:` and `Referer:` forged to a foreign host, and `401` with a wrong token.
+- **`/DATA` is mounted read-only at `/data`.** A backup tool never writes into the
+  data it protects, and restores come back through the UI as a download. If you
+  snapshot `/data` whole, exclude `/data/AppData/kopia` — the repository is
+  visible through that mount too, and a repository that backs itself up never
+  stops growing.
+- **It runs as root**, the only package here that does, and deliberately: a backup
+  tool that may not read a file does not fail, it skips the file and reports
+  success. The mount is read-only, so root buys reach, not write power.
+- **`--insecure` is not laziness.** Without it Kopia exits with "TLS not
+  configured. To start server without encryption pass --insecure". A self-signed
+  certificate would put a browser warning behind every tile click, so this serves
+  HTTP and puts HTTP basic auth in front. Behind a TLS-terminating proxy for
+  anything beyond the LAN.
+- **`Others`, because there is no `Backup`.** Counted on the host: the curated
+  sources use nine categories (AI, Developer, Finance, Home, Media, Networking,
+  Others, Productivity, Social) and none of them is a backup shelf. The bundled
+  legacy `default` store does have one — with a single app in it.
+
+```bash
+python3 zimapp.py validate kopia.yml
+python3 zimapp.py install  kopia.yml --host <ip> --user <zimaos-user>
+```
+
+*Verified 2026-08-13 on ZimaOS v1.7.1-beta1 (ZimaCube Pro, amd64): installed from
+this file, tile after 9 s, `health=healthy`, `RestartPolicy=unless-stopped`,
+`Config.Cmd` exactly the five arguments written here, and the image's
+`RepoDigest` is the `sha256:89fd95ee…` the header claims. All five mounts landed;
+`/DATA -> /data` is `RW=false`, a write into `/data` is refused with "Read-only
+file system" while the same write into `/repository` succeeds — so the flag is
+real and the container is not simply broken. As shipped the app answered `401` to
+everything; after filling the three variables in through `zimapp update` (a
+3-line diff, nothing else moved) it answered `200` to the right credentials and
+`401` to a wrong password, from the LAN. Then the whole point, end to end: a
+filesystem repository was created (AES256-GCM / BLAKE2B-256-128, real blobs on
+disk under `/DATA/AppData/kopia/repository`), `/data/StorageTest` was snapshotted,
+and the file read back out of the encrypted repository has **the same sha256** as
+the file on the host — `196c25a8…`, byte for byte. The UI was opened in a real
+browser and shows the repository, the source and the snapshot, with CSRF checks
+in place. The tile is in the grid and its rendered pixels match the real Kopia
+logo in 51 of 64 sampled cells, against 8 of 64 for a different logo as a control.
+Not verified: arm64, a cloud repository (S3/B2/SFTP), `kopia mount` restores
+(needs FUSE and `SYS_ADMIN`, deliberately not granted), and scheduled snapshots
+over time.*
+
+## The notebook — the same warning, after the install
+
+Every installed app has a **Notebook** in its tile context menu: a Markdown note
+that survives restarts and sits where someone looks when they have forgotten how
+an app was wired. `install` and `update --apply` fill it from
+`x-casaos.tips.before_install`, the same field the store's pre-install dialog
+renders.
+
+That is not duplication, it closes a gap. `tips.before_install` only ever reaches
+someone who installs **from a store** — the store build moves the field out of the
+published compose into `apps/<id>/meta.json`, and the UI fetches that separately.
+Import a compose by hand and no such record exists, so the tip is never shown. The
+notebook is the one channel that reaches both kinds of install.
+
+The compose cannot carry it: the install path builds the dashboard resource config
+from `display_name`, `icon`, `scheme`, `hostname`, `port_map` and `index`, and
+`notes` is written in exactly one place in the whole shipped UI — the user's own
+save. So zimapp writes it afterwards, through
+`PUT /v2/dashboard/resource/configs` (§34.10).
+
+**Your own notes are kept.** The text goes between two markers:
+
+```markdown
+<!-- zimapp:managed:begin -->
+> ⚠️ zimapp writes this block … replaced on the next `zimapp update` — put your
+> own notes outside them, those are kept.
+
+…the tip from the compose…
+<!-- zimapp:managed:end -->
+```
+
+An update replaces **only** what is between the markers. If there are no markers
+because someone had already written in the notebook, the block goes **above** that
+text rather than over it. HTML comments work as markers because the editor renders
+with `marked` and the bundle ships no sanitizer, so they end up as comment nodes —
+invisible in the preview, visible in the textarea while editing. (That last part is
+inferred from the library, not seen on screen, which is why the marker also reads
+as plain English.)
+
+Rules it follows, each pinned by a test: a dry run writes nothing, running twice
+changes nothing, a changed tip replaces the block and nothing else, a compose
+without `tips.before_install` leaves the notebook alone, and a failure to write is
+a warning rather than a failed install — the app is up at that point.
 
 ## What the converter translates
 
@@ -683,6 +1064,11 @@ rule has to come by there.
 | `test_zimapp.py` | regression tests |
 | `blueprints/` | tested recipes: pinned source, the values an app needs, expectations |
 | `invoiceninja.yml` | finished, verified Invoice Ninja app (hand-built — the converter cannot do this one) |
+| `soulsync.yml` | finished, verified SoulSync app (converted, then wired into ZimaOS' own media folders) |
+| `slskd.yml` | finished, verified slskd app — SoulSync's download backend, sharing one folder with it |
+| `jellyfin.yml` | finished, verified Jellyfin app — reads the same library read-only, GPU render node passed through |
+| `onlyoffice.yml` | finished, verified ONLYOFFICE Docs app — one container, the editing engine a file app points at |
+| `kopia.yml` | finished, verified Kopia app — encrypted backup of /DATA, read-only, passwords empty until you set them |
 | `paperless-ngx.yml` | the compose the paperless-ngx blueprint generates, as installed |
 | `zimapp-zimaos.yml` | ready-to-install ZimaOS compose on the released image |
 | `Dockerfile`, `zimapp-src.yml` | build and deployment as a ZimaOS app |

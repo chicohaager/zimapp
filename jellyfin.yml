@@ -1,0 +1,153 @@
+# Jellyfin — media server — as a ZimaOS app, reading the library SoulSync fills.
+#
+# Install: ZimaOS App Store → "Install a customized app" → Import this file
+#          (or: python3 zimapp.py install jellyfin.yml --host <ip> --user <zimaos-user>)
+#
+# Upstream: https://github.com/jellyfin/jellyfin (GPL-2.0) · image
+# `jellyfin/jellyfin:10.11.11` (amd64 + arm64, checked against the manifest —
+# 10.11.11 is the newest stable release; `12.0-rc3`, `preview` and `unstable`
+# exist on Docker Hub and are pre-release). Built from upstream's own compose
+# example (jellyfin.org, `_container-docker-compose.md`), not from a third-party
+# template.
+#
+# ────────────────────────────────────────────────────────────────────────────
+# WHY NOT THE APP STORE ENTRY. ZimaOS ships a Jellyfin in its bundled `default`
+# store (the CasaOS-legacy source), and it works — but it publishes 8097/8921
+# instead of the canonical ports, mounts `/opt/vc/lib` (a Raspberry-Pi-era
+# leftover), and passes **no GPU device**, so every transcode runs on the CPU.
+# This file is the same server wired for a ZimaCube: canonical ports, the render
+# node passed through, and the media library mounted read-only.
+#
+# ────────────────────────────────────────────────────────────────────────────
+# WHAT IT MOUNTS, AND WHY READ-ONLY
+#
+#   /DATA/Media → /media, READ-ONLY. Jellyfin keeps its metadata and artwork in
+#   /config by default, so it does not need to write into the library — and a
+#   media server that cannot touch your files cannot damage them either. If you
+#   want NFO/artwork written next to the media (Dashboard → Libraries → "Save
+#   artwork into media folders"), remove the `read_only: true` line below;
+#   nothing else changes. The library is the same folder SoulSync organises into
+#   (/DATA/Media/Music) and the one ZimaOS itself suggests for media.
+#
+#   /config and /cache go to /DATA/AppData/jellyfin/. Keep them apart: /cache
+#   holds transcoding scratch and image caches and can grow, and it is the one
+#   directory that is safe to delete when it does.
+#
+# 🔴 HARDWARE TRANSCODING is prepared but NOT switched on. The device is passed
+# in (`devices: /dev/dri`), which is all a compose can do — the rest is a click:
+# Dashboard → Playback → Transcoding → hardware acceleration **VAAPI**, device
+# `/dev/dri/renderD128`. Measured on the ZimaCube this was built for: AMD
+# Ryzen 7 6800H with Radeon graphics, `/dev/dri/renderD128` present with mode
+# `crw-rw-rw-`, which is why the container can use it while running as uid 1000
+# without any group juggling. On a machine where that node is `crw-rw----`
+# (Jellyfin's own AMD guide shows exactly that case), either add the render
+# group or run the container as root, otherwise VAAPI silently falls back to
+# software. `/dev/dri/card0` is NOT usable by uid 1000 here (mode `crw-rw----`,
+# group `video`) — VAAPI does not need it.
+#
+# ⚠️ PORTS. 8096 is the web UI. 7359/udp is the autodiscovery responder that lets
+# Jellyfin apps on phones and TVs find the server by themselves. DLNA (1900/udp)
+# is deliberately NOT published: it was already in use on the host this was
+# tested on, and Jellyfin's DLNA server is off by default anyway. Open 8096 in
+# the ZimaOS firewall (ZFW) — and 7359/udp too if you want autodiscovery.
+#
+# For autodiscovery to hand out the right address, set
+# `JELLYFIN_PublishedServerUrl=http://<your-zimaos-ip>:8096` in `environment`
+# below. It is left out on purpose: an address belongs to a machine, not to a
+# file that gets copied.
+#
+# ────────────────────────────────────────────────────────────────────────────
+# VERIFIED 2026-07-28 on ZimaOS v1.7.0-beta1 (ZimaCube, amd64), installed from
+# exactly these bytes — see the `jellyfin.yml` section in README.md for what was
+# measured.
+#
+name: jellyfin
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.11.11
+    container_name: jellyfin
+    user: '1000:1000'
+    environment:
+    - TZ=Europe/Berlin
+    restart: unless-stopped
+    devices:
+    - /dev/dri:/dev/dri
+    ports:
+    - mode: ingress
+      target: 8096
+      published: '8096'
+      protocol: tcp
+    - mode: ingress
+      target: 7359
+      published: '7359'
+      protocol: udp
+    volumes:
+    - type: bind
+      source: /DATA/AppData/jellyfin/config
+      target: /config
+    - type: bind
+      source: /DATA/AppData/jellyfin/cache
+      target: /cache
+    - type: bind
+      source: /DATA/Media
+      target: /media
+      read_only: true
+    networks:
+    - jellyfin-network
+    labels:
+      icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/jellyfin.png
+    deploy:
+      resources:
+        limits:
+          memory: 4GB
+          cpus: '4.00'
+    x-casaos:
+      ports:
+      - container: '8096'
+        description:
+          en_us: WebUI port (8096)
+      - container: '7359'
+        description:
+          en_us: Client autodiscovery (7359/udp)
+      volumes:
+      - container: /config
+        description:
+          en_us: Configuration, database, metadata and artwork
+      - container: /cache
+        description:
+          en_us: Transcoding and image cache — safe to delete when it grows
+      - container: /media
+        description:
+          en_us: Media library, read-only (the folder SoulSync organises into)
+networks:
+  jellyfin-network:
+    driver: bridge
+x-casaos:
+  architectures:
+  - amd64
+  - arm64
+  main: jellyfin
+  # Reverse-domain id, required by the ZimaOS app store (v2). It names who
+  # publishes this file, not who writes Jellyfin — change it if you fork.
+  id: io.github.chicohaager.jellyfin
+  scheme: http
+  version: 10.11.11
+  author: Lintuxer
+  developer: Jellyfin
+  category: Media
+  icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/jellyfin.png
+  title:
+    en_us: Jellyfin
+    custom: Jellyfin
+  tagline:
+    en_us: Media server for film, series and music — no account, no cloud
+  description:
+    en_us: >-
+      Jellyfin streams your own film, series and music collection to browsers,
+      phones, tablets and TVs. It runs entirely on your machine — no account,
+      no telemetry, no cloud. This package mounts /DATA/Media read-only and
+      passes the GPU render node through, so hardware transcoding only needs to
+      be switched on under Dashboard → Playback.
+  index: /
+  is_uncontrolled: false
+  port_map: '8096'
