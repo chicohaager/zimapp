@@ -12,6 +12,34 @@
 # so that the shipped bytes are the tested bytes — whoever keeps that install
 # has to change the admin password, because this file is public.
 !invoiceninja.yml
+# Same reasoning for soulsync.yml, minus the warning: `convert` gets it 80 % of
+# the way, but the eleven mounts that make the app useful are hand-wired against
+# ZimaOS' own media folders, so it is source too. It contains NO secrets — the
+# app has no credentials in its compose at all, and nothing in it was generated
+# for a live installation.
+!soulsync.yml
+# slskd.yml ships for the same reason and comes with the invoiceninja caveat back:
+# it DOES carry secrets — a web UI password and an API key, both generated for
+# this file and marked "change this" in its header. They are the values the
+# verification install ran with, so the shipped bytes are the tested bytes.
+# ⚠️ Whoever keeps that install has to change both, because this file is public.
+!slskd.yml
+# jellyfin.yml: same family, no secrets at all (the admin account is created in
+# the setup wizard on first start, not in the file).
+!jellyfin.yml
+# onlyoffice.yml: same family. The converter cannot touch it (upstream's compose
+# carries a `build:` block), so it is source. Its one secret is a deliberate
+# placeholder — `change-me-before-you-connect-anything`, the value the
+# verification install ran with, so the shipped bytes are the tested bytes.
+# ⚠️ Whoever keeps that install has to replace it, because this file is public.
+!onlyoffice.yml
+# kopia.yml: same family, and the one file here that carries NO secret at all —
+# its three password variables ship empty on purpose. That is not an oversight to
+# be fixed before publishing: with them empty the server answers 401 to every
+# request, so an unconfigured install is locked rather than open. The shipped
+# bytes are the tested bytes; the verification install got its values afterwards,
+# through `zimapp update`, exactly the way a user sets them.
+!kopia.yml
 
 __pycache__/
 *.pyc
