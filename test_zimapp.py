@@ -2120,5 +2120,95 @@ class StoreMetadata(unittest.TestCase):
         self.assertNotIn('default="https://icon.casaos.io/main/all/box.png"', source)
 
 
+class TileNotebook(unittest.TestCase):
+    """`tips.before_install` also goes into the tile's notebook after installing.
+
+    The store dialog renders that field only for someone who installs from the
+    store; a hand-imported compose never shows it. The notebook is the one
+    channel that reaches both, so the same text is written there — and the
+    merging is what decides whether that is a service or a data loss.
+    """
+
+    def _compose(self, tip="Set the password before you start.", key="en_us"):
+        return {"name": "demo", "x-casaos": {"tips": {"before_install": {key: tip}}}}
+
+    def test_the_tip_is_read_in_either_locale_spelling(self):
+        """We write en_us, the official store writes en_US — both must count,
+        exactly as everywhere else (see english_text)."""
+        self.assertEqual(core.notebook_text(self._compose(key="en_us")),
+                         "Set the password before you start.")
+        self.assertEqual(core.notebook_text(self._compose(key="en_US")),
+                         "Set the password before you start.")
+
+    def test_a_compose_without_tips_yields_nothing_to_write(self):
+        """Most composes have no tip. Inventing a note would be worse than an
+        empty notebook — the caller must be able to tell 'nothing to say' from
+        'something to say'."""
+        for doc in ({"name": "demo"},
+                    {"name": "demo", "x-casaos": {}},
+                    {"name": "demo", "x-casaos": {"tips": {}}},
+                    {"name": "demo", "x-casaos": {"tips": {"before_install": {"de_DE": "nur deutsch"}}}}):
+            self.assertEqual(core.notebook_text(doc), "", doc)
+
+    def test_an_empty_notebook_gets_the_block_and_the_notice(self):
+        merged = core.merge_notebook("", "Set the password.")
+        self.assertIn(core.NOTEBOOK_BEGIN, merged)
+        self.assertIn(core.NOTEBOOK_END, merged)
+        self.assertIn("Set the password.", merged)
+        self.assertIn("replaced on the next", merged,
+                      "the block has to say that it is overwritten, or the next "
+                      "update eats someone's notes without warning")
+
+    def test_an_update_replaces_only_our_block_and_keeps_the_rest(self):
+        """The decisive one. The rule was 'overwrite their notes if there is
+        no other way' — there is another way, and this is it."""
+        first = core.merge_notebook("", "Old text.")
+        with_user = first + "\n\n## My own notes\n\nrepo password is in the safe"
+        second = core.merge_notebook(with_user, "New text.")
+        self.assertIn("New text.", second)
+        self.assertNotIn("Old text.", second)
+        self.assertIn("repo password is in the safe", second,
+                      "a user's own note must survive an update")
+        self.assertIn("## My own notes", second)
+        self.assertEqual(second.count(core.NOTEBOOK_BEGIN), 1,
+                         "repeated updates must not stack block after block")
+
+    def test_repeated_updates_are_idempotent(self):
+        once = core.merge_notebook("", "Same text.")
+        twice = core.merge_notebook(once, "Same text.")
+        self.assertEqual(once, twice)
+
+    def test_notes_that_are_not_ours_are_never_destroyed(self):
+        """Someone wrote in the notebook before zimapp ever touched it. That text
+        predates us and is not ours to replace."""
+        merged = core.merge_notebook("mounted the NAS share manually, see ticket 41", "Fresh tip.")
+        self.assertIn("mounted the NAS share manually, see ticket 41", merged)
+        self.assertIn("Fresh tip.", merged)
+
+    def test_a_truncated_marker_pair_does_not_swallow_the_notebook(self):
+        """If only the begin marker survives someone's editing, the safe move is
+        to leave their text alone and add ours — not to treat the rest of the
+        file as our block and delete it."""
+        damaged = f"{core.NOTEBOOK_BEGIN}\nhalf a block\n\n## mine\nkeep me"
+        merged = core.merge_notebook(damaged, "Fresh tip.")
+        self.assertIn("keep me", merged)
+        self.assertIn("Fresh tip.", merged)
+
+    def test_the_resource_id_has_the_shape_the_dashboard_returned(self):
+        """Measured on v1.7.1-beta1: GET /v2/dashboard/list gives
+        `zimaapp://v2app/kopia` for a v2 app. An unknown id answers 200 with an
+        empty item map — same as 'no notebook yet' — so this shape is not
+        something to get subtly wrong."""
+        self.assertEqual(core.dashboard_resource_id("kopia"), "zimaapp://v2app/kopia")
+
+    def test_the_managed_block_survives_the_servers_rstrip(self):
+        """The server rstrips `notes` on save (isolated with a minimal probe:
+        'a\\nb\\n\\n   ' comes back as 'a\\nb'). If our block ended in trailing
+        whitespace, the read-back comparison would fail on every single write."""
+        merged = core.merge_notebook("", "Tip.")
+        self.assertEqual(merged, merged.rstrip())
+        self.assertTrue(merged.endswith(core.NOTEBOOK_END))
+
+
 if __name__ == "__main__":
     unittest.main()

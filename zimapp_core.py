@@ -1515,6 +1515,130 @@ def uninstall(host, user, password, name):
     return api(host, "DELETE", f"{INSTALL_PATH}/{name}?delete_config_folder=true", token)
 
 
+# --- The tile's notebook ----------------------------------------------------
+#
+# Every installed app has a "Notebook" in its tile context menu: a Markdown note
+# that survives restarts and sits where a user looks when they have forgotten how
+# an app was wired. A compose file CANNOT fill it — the install path builds the
+# dashboard resource config from `display_name`, `icon`, `scheme`, `hostname`,
+# `port_map` and `index`, and `notes` is written in exactly one place in the whole
+# shipped UI: the user's own save. A tool can write it afterwards, and that is
+# worth doing, because it is the ONLY channel that reaches a hand-imported
+# install — `tips.before_install` only ever renders for someone who installed
+# from the store (KB §34.7, §34.10).
+#
+# So the same text serves both: the store dialog shows it before installing, the
+# notebook keeps it afterwards.
+
+NOTEBOOK_BEGIN = "<!-- zimapp:managed:begin -->"
+NOTEBOOK_END = "<!-- zimapp:managed:end -->"
+
+# Rendered with `marked` and no sanitizer (checked in the shipped bundle: zero
+# occurrences of "sanitiz"), so HTML comments pass through into innerHTML as
+# comment nodes — invisible in the preview, visible in the textarea when someone
+# edits. Which is what we want: the marker explains itself to whoever meets it.
+NOTEBOOK_NOTICE = (
+    "> ⚠️ **zimapp writes this block** from the app definition "
+    "(`x-casaos.tips.before_install`). Everything between the two markers is "
+    "**replaced on the next `zimapp update`** — put your own notes outside them, "
+    "those are kept."
+)
+
+
+def dashboard_resource_id(name):
+    """The id the dashboard knows an app by.
+
+    Resolve it from `GET /v2/dashboard/list` when you can; this is the shape that
+    list returns for a v2 app (measured: `zimaapp://v2app/kopia`). Never guess it
+    for a *read* — an unknown id answers `200 {"items":{}}`, exactly like an id
+    that has no notebook yet, so a read alone cannot tell the two apart.
+    """
+    return f"zimaapp://v2app/{name}"
+
+
+def notebook_text(doc):
+    """The English `tips.before_install` of a compose, or "" if it has none."""
+    casaos = (doc or {}).get("x-casaos")
+    if not isinstance(casaos, dict):
+        return ""
+    tips = casaos.get("tips")
+    if not isinstance(tips, dict):
+        return ""
+    return english_text(tips.get("before_install")).strip()
+
+
+def merge_notebook(existing, managed):
+    """Replace only our own block, keep whatever else the user wrote.
+
+    The rule was "overwrite their notes if there is no other way". There is
+    another way, so this takes it: the managed text lives between two markers and
+    everything outside them survives. A user who never touches the notebook sees
+    only our block; a user who wrote below it keeps their text through every
+    update.
+
+    Returns the full new notebook. The server rstrips `notes` on save (isolated
+    with a minimal probe), so we hand it a stripped string and compare stripped.
+    """
+    block = f"{NOTEBOOK_BEGIN}\n{NOTEBOOK_NOTICE}\n\n{managed.strip()}\n{NOTEBOOK_END}"
+    old = str(existing or "")
+    start = old.find(NOTEBOOK_BEGIN)
+    end = old.find(NOTEBOOK_END)
+    if start != -1 and end != -1 and end > start:
+        merged = old[:start] + block + old[end + len(NOTEBOOK_END):]
+    elif old.strip():
+        # Notes exist but none of them are ours — do not touch what is there,
+        # add ours above it with a blank line between.
+        merged = f"{block}\n\n{old.strip()}"
+    else:
+        merged = block
+    return merged.strip()
+
+
+def read_notebook(host, name, user=None, password=None, token=None):
+    """(notes, token). Empty string when the app has no notebook yet."""
+    token = token or login(host, user, password)
+    rid = dashboard_resource_id(name)
+    quoted = urllib.parse.quote(rid, safe="")
+    status, raw = api(host, "GET", f"/v2/dashboard/resource/configs?resource_unapp_ids={quoted}", token)
+    if status != 200:
+        raise ConvertError(f"Reading the notebook of '{name}' failed (HTTP {status}): {raw[:200]}")
+    try:
+        items = json.loads(raw)["data"]["items"]
+    except (KeyError, ValueError) as e:
+        raise ConvertError(f"Unexpected notebook answer for '{name}': {raw[:200]}") from e
+    return str((items.get(rid) or {}).get("notes") or ""), token
+
+
+def write_notebook(host, name, doc, user=None, password=None, token=None):
+    """Put the compose's `tips.before_install` into the tile's notebook.
+
+    Returns a dict: {"written": bool, "reason": str, "chars": int}. A compose
+    without `tips.before_install` is not an error — most have none, and inventing
+    a note would be worse than leaving the notebook empty.
+
+    Verified by reading back: the PUT answers `{"message":"success"}` for an id
+    that does not exist too, so the answer is not the witness.
+    """
+    managed = notebook_text(doc)
+    if not managed:
+        return {"written": False, "reason": "no x-casaos.tips.before_install in the definition", "chars": 0}
+    existing, token = read_notebook(host, name, user, password, token)
+    merged = merge_notebook(existing, managed)
+    if merged == existing.strip():
+        return {"written": False, "reason": "notebook already says this", "chars": len(merged)}
+    body = json.dumps({"resource_unapp_id": dashboard_resource_id(name), "notes": merged})
+    status, raw = api(host, "PUT", "/v2/dashboard/resource/configs", token, body)
+    if status != 200:
+        raise ConvertError(f"Writing the notebook of '{name}' failed (HTTP {status}): {raw[:200]}")
+    back, _ = read_notebook(host, name, token=token)
+    if back.strip() != merged:
+        raise ConvertError(
+            f"The notebook of '{name}' did not come back as written "
+            f"({len(back)} chars stored, {len(merged)} sent) — not reporting it as done."
+        )
+    return {"written": True, "reason": "", "chars": len(merged)}
+
+
 # --- One call from URL to YAML ---------------------------------------------
 
 def build_from_source(url_or_path, meta, variables=None, options=None):
