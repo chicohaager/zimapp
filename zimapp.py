@@ -278,6 +278,25 @@ def cmd_install(args):
     if failed:
         die(f"{failed} check(s) failed — the app is installed but not usable as it stands.")
     print("The app is up and answering." + (" All expectations hold." if expectations else ""))
+    seed_notebook(args, name, text, user, password)
+
+
+def seed_notebook(args, name, text, user, password):
+    """Put `tips.before_install` into the tile's notebook, and say what happened.
+
+    Never fatal. The app is installed and working at this point; a dashboard note
+    that did not get written is worth a line of output, not a non-zero exit.
+    """
+    try:
+        result = core.write_notebook(args.host, name, core.yaml.safe_load(text), user, password)
+    except Exception as e:                                    # noqa: BLE001 — see docstring
+        print(f"  [warn] notebook not written: {e}", file=sys.stderr)
+        return
+    if result["written"]:
+        print(f"  [ok  ] notebook filled from tips.before_install ({result['chars']} chars) — "
+              f"tile → Notebook")
+    else:
+        print(f"  [skip] notebook untouched — {result['reason']}")
 
 
 def cmd_uninstall(args):
@@ -421,6 +440,11 @@ def cmd_update(args):
     if not changes:
         print(f"No differences — '{args.name}' already matches its source.")
         print(f"({core.SERVICE_X_CASAOS_NOTE}.)")
+        # The notebook is not part of the compose, so it can be stale while the
+        # compose is not. Sync it anyway — but only with --apply: a dry run must
+        # not write anything, and this writes.
+        if args.apply:
+            seed_notebook(args, args.name, text, user, password)
         return
     print(f"{len(changes)} difference(s) between the installation and the new definition:")
     for c in changes:
@@ -493,6 +517,7 @@ def cmd_update(args):
     if failed:
         die(f"{failed} check(s) failed after the update.")
     print("The app is up and answering.")
+    seed_notebook(args, args.name, text, user, password)
 
 
 def cmd_blueprints(args):
