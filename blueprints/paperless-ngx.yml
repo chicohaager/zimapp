@@ -56,7 +56,7 @@ expect:
 # True, so `verified.on` would silently never be readable by name.
 verified:
   date: 2026-07-19
-  host: ZimaOS v1.7.0-beta1 (192.168.1.147)
+  host: ZimaOS v1.7.0-beta1 (older test NAS)
   # Fingerprint of the upstream file, taken on the date below — NOT on the proof
   # date above, because what upstream looked like on 19.07. cannot be recovered.
   # It answers one question: "has upstream moved since someone last looked?"
