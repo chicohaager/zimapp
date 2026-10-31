@@ -1023,7 +1023,7 @@ class BrokenYamlDiagnosis(unittest.TestCase):
 class AbsoluteBindMounts(unittest.TestCase):
     """Absolute paths outside /DATA cannot work on ZimaOS — root is read-only.
 
-    Measured on nas-old (2026-07-21): `docker run -v /srv/x:/y` fails with
+    Measured on an older test NAS (2026-07-21): `docker run -v /srv/x:/y` fails with
     "error while creating mount source path '/srv/x': mkdir /srv: read-only
     file system". The pterodactyl example compose has four of them; zimapp used
     to pass them through with a note and report "satisfies every rule".
@@ -1044,7 +1044,7 @@ class AbsoluteBindMounts(unittest.TestCase):
     def test_dockers_own_state_is_not_moved(self):
         """wings mounts /var/lib/docker/containers to read logs — moving it breaks it.
 
-        Docker Root Dir on nas-old is /var/lib/docker, so that path means the daemon's
+        Docker Root Dir on that NAS is /var/lib/docker, so that path means the daemon's
         own directory, not app data.
         """
         result, _, _ = build("""

@@ -18,7 +18,7 @@ and it can be saved as a blueprint, downloaded or handed straight to ZimaOS:
 ![The result step: the generated ZimaOS compose, the notes that came out of the
 conversion, and the install form](docs/screenshot-result.jpg)
 
-Verified on **ZimaOS v1.7.0-beta1** (host 192.168.50.100), as of 19.07.2026:
+Verified on **ZimaOS v1.7.0-beta1** (on the test NAS), as of 19.07.2026:
 paperless-ngx (webserver + postgres + redis) generated from the upstream URL,
 installed, container `healthy`, tile in the grid, login as superuser proven.
 zimapp itself runs there as an app on port 8790 — since 21.07.2026 from the
@@ -118,20 +118,20 @@ it needs no registry account:
 
 ```bash
 # 1. Put the build context on the host and build it there
-ssh youruser@192.168.50.100 'mkdir -p /DATA/AppData/zimapp/src'
-scp Dockerfile zimapp*.py youruser@192.168.50.100:/DATA/AppData/zimapp/src/
-scp -r static youruser@192.168.50.100:/DATA/AppData/zimapp/src/
-ssh youruser@192.168.50.100 'export DOCKER_CONFIG=/DATA/AppData/.dockercfg; \
+ssh youruser@192.168.10.100 'mkdir -p /DATA/AppData/zimapp/src'
+scp Dockerfile zimapp*.py youruser@192.168.10.100:/DATA/AppData/zimapp/src/
+scp -r static youruser@192.168.10.100:/DATA/AppData/zimapp/src/
+ssh youruser@192.168.10.100 'export DOCKER_CONFIG=/DATA/AppData/.dockercfg; \
     cd /DATA/AppData/zimapp/src && docker build -t zimapp:local .'
 
 # 2. Generate own compose and install
 python3 zimapp.py convert zimapp-src.yml --name zimapp --title zimapp \
-    --category Developer --icon "http://192.168.50.100:8790/icon.svg" \
+    --category Developer --icon "http://192.168.10.100:8790/icon.svg" \
     --no-icon-check -o zimapp-app.yml           # icon only exists after startup
 python3 zimapp.py install zimapp-app.yml
 ```
 
-Then: **<http://192.168.50.100:8790>**, tile "zimapp" in the ZimaOS grid.
+Then: **<http://192.168.10.100:8790>**, tile "zimapp" in the ZimaOS grid.
 
 🔴 **After a rebuild, `docker restart` is not enough** — the existing container
 keeps running with the old image. A new image needs a recreate.
@@ -167,7 +167,7 @@ installing work fully. This applies to both ways of installing above.
 ## CLI
 
 ```bash
-export ZIMA_HOST=192.168.50.100
+export ZIMA_HOST=192.168.10.100
 export ZIMA_USER=youruser
 export ZIMA_PASS='…'
 
@@ -268,7 +268,7 @@ Waiting for the app (HTTP 200 means accepted, not done)…
   t+   0s  not in the grid yet
   t+   3s  running
   [ok  ] app in the grid — status 'running' after 3s
-  [ok  ] answers at http://192.168.50.100:8790 — HTTP 200
+  [ok  ] answers at http://192.168.10.100:8790 — HTTP 200
 ```
 
 When something fails, the check names the cause instead of the symptom:
@@ -393,7 +393,7 @@ blueprint records what was actually observed and when:
 ```yaml
 verified:
   date: 2026-07-19
-  host: ZimaOS v1.7.0-beta1 (192.168.50.100)   # NB: 'host', not 'on' — see below
+  host: ZimaOS v1.7.0-beta1 (test NAS)   # NB: 'host', not 'on' — see below
   result: >-
     Converted, installed, all three containers up, webserver healthy, tile in
     the grid, superuser login proven via POST (302).

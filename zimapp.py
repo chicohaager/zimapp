@@ -13,13 +13,13 @@ see RULES below and ZIMAOS-KNOWLEDGE.md §3.4/§4.4.1/§5.
 Usage:
     zimapp.py serve                                    # web UI on 127.0.0.1:8790
     zimapp.py convert https://…/docker-compose.yml --title "Nextcloud" > app.yml
-    zimapp.py inspect  nginx:alpine --host 192.168.50.100
-    zimapp.py generate nginx:alpine --host 192.168.50.100 --title "Webserver" > app.yml
+    zimapp.py inspect  nginx:alpine --host 192.168.10.100
+    zimapp.py generate nginx:alpine --host 192.168.10.100 --title "Webserver" > app.yml
     zimapp.py validate app.yml
-    zimapp.py install  app.yml --host 192.168.50.100
+    zimapp.py install  app.yml --host 192.168.10.100
     zimapp.py update   my-webserver --blueprint my-webserver     # diff; --apply to apply
     zimapp.py drift                                              # has upstream moved?
-    zimapp.py uninstall my-webserver --host 192.168.50.100
+    zimapp.py uninstall my-webserver --host 192.168.10.100
 
 Credentials come from the environment (ZIMA_USER / ZIMA_PASS) or --user/--pass.
 """

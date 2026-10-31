@@ -60,7 +60,7 @@ SUPPORTING_IMAGES = {
 # Paths that must NOT be rewritten to /DATA/AppData: sockets and devices have to
 # stay where the kernel has them, and /var/lib/docker is the daemon's own state —
 # an app that mounts it (wings reads container logs there) means exactly that
-# directory. Docker Root Dir measured on nas-old: /var/lib/docker.
+# directory. Docker Root Dir measured on an older test NAS: /var/lib/docker.
 # /tmp is a real writable tmpfs on the host (measured: rw,nosuid,nodev) — a bind
 # there wants scratch space, and moving it to /DATA would make throwaway data
 # persistent and eat disk. It also breaks apps that need the path to be identical
@@ -1256,7 +1256,7 @@ def framework_checks(services):
 def dollar_findings(doc, limit=3):
     """Every literal '$' in a value — it does not survive the install API.
 
-    Measured on ZimaOS v1.7.0-beta1 (2026-07-24, nas-old): the API collapses the
+    Measured on ZimaOS v1.7.0-beta1 (2026-07-24, older test NAS): the API collapses the
     compose escape '$$' back to a single '$' while storing the file, and the
     'docker compose up' that follows reads that '$' as one of its own variables
     and substitutes the empty string. An nginx config that a container wrote
